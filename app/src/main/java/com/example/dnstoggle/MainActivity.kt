@@ -27,7 +27,8 @@ import android.widget.Toast
 
 object DnsHelper {
     private const val PREFS_NAME = "dns_prefs"
-    private const val KEY_SERVER = "dns_server"
+    private const val KEY_SELECTED_SERVER = "dns_server"
+    private const val KEY_SERVER_LIST = "dns_server_list"
     const val DEFAULT_SERVER = "geohide.ru"
 
     fun hasPermission(context: Context): Boolean {
@@ -39,21 +40,78 @@ object DnsHelper {
         return Settings.Global.getString(context.contentResolver, "private_dns_specifier")?.trim() ?: ""
     }
 
-    fun getSavedServer(context: Context): String {
+    // Получить список всех сохраненных DNS-серверов
+    fun getServerList(context: Context): List<String> {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val saved = prefs.getString(KEY_SERVER, null)?.trim()
-        if (!saved.isNullOrEmpty()) return saved
+        val raw = prefs.getString(KEY_SERVER_LIST, null)
 
-        // Если в приложении еще ничего не сохраняли, берем текущий сервер из системы
-        val sysServer = getCurrentSystemServer(context)
-        return if (sysServer.isNotEmpty()) sysServer else DEFAULT_SERVER
+        if (raw == null) {
+            // Первый запуск: формируем стартовый список + текущий сервер из системы
+            val initial = mutableListOf("geohide.ru", "dns.adguard-dns.com")
+            val sys = getCurrentSystemServer(context)
+            if (sys.isNotEmpty() && !initial.contains(sys)) {
+                initial.add(0, sys)
+            }
+            saveServerList(context, initial)
+            return initial
+        }
+
+        return raw.split("\n")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
     }
 
-    fun saveServer(context: Context, server: String) {
-        val clean = server.trim().ifEmpty { DEFAULT_SERVER }
+    private fun saveServerList(context: Context, list: List<String>) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
-            .putString(KEY_SERVER, clean)
+            .putString(KEY_SERVER_LIST, list.distinct().joinToString("\n"))
+            .apply()
+    }
+
+    // Добавить новый сервер в список
+    fun addServerToList(context: Context, server: String): Boolean {
+        val clean = server.trim().lowercase()
+        if (clean.isEmpty()) return false
+        val list = getServerList(context).toMutableList()
+        if (!list.contains(clean)) {
+            list.add(0, clean) // Добавляем в начало списка
+            saveServerList(context, list)
+        }
+        saveSelectedServer(context, clean)
+        return true
+    }
+
+    // Удалить сервер из списка
+    fun removeServerFromList(context: Context, server: String) {
+        val list = getServerList(context).toMutableList()
+        list.remove(server)
+        saveServerList(context, list)
+
+        // Если удалили выбранный сервер, выбираем первый из оставшихся
+        if (getSavedServer(context) == server) {
+            val next = list.firstOrNull() ?: DEFAULT_SERVER
+            saveSelectedServer(context, next)
+        }
+    }
+
+    // Получить текущий выбранный сервер (для включения и для кнопки в шторке)
+    fun getSavedServer(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val saved = prefs.getString(KEY_SELECTED_SERVER, null)?.trim()
+        if (!saved.isNullOrEmpty()) return saved
+
+        val sysServer = getCurrentSystemServer(context)
+        if (sysServer.isNotEmpty()) return sysServer
+
+        return getServerList(context).firstOrNull() ?: DEFAULT_SERVER
+    }
+
+    fun saveSelectedServer(context: Context, server: String) {
+        val clean = server.trim().lowercase().ifEmpty { DEFAULT_SERVER }
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_SELECTED_SERVER, clean)
             .apply()
     }
 
@@ -66,8 +124,8 @@ object DnsHelper {
         return try {
             val resolver = context.contentResolver
             if (enable) {
-                val cleanServer = server.trim().ifEmpty { DEFAULT_SERVER }
-                saveServer(context, cleanServer)
+                val cleanServer = server.trim().lowercase().ifEmpty { getSavedServer(context) }
+                addServerToList(context, cleanServer)
                 Settings.Global.putString(resolver, "private_dns_specifier", cleanServer)
                 Settings.Global.putString(resolver, "private_dns_mode", "hostname")
             } else {
@@ -82,9 +140,10 @@ object DnsHelper {
 
 class MainActivity : Activity() {
     private lateinit var statusText: TextView
-    private lateinit var serverInput: EditText
     private lateinit var btnEnable: Button
     private lateinit var btnDisable: Button
+    private lateinit var serverListContainer: LinearLayout
+    private lateinit var newServerInput: EditText
     private lateinit var adbInfoBox: LinearLayout
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -101,40 +160,37 @@ class MainActivity : Activity() {
 
         // 1. Блок текущего статуса
         statusText = TextView(this).apply {
-            textSize = 20f
+            textSize = 19f
             setTypeface(null, Typeface.BOLD)
             gravity = Gravity.CENTER
-            setPadding(32, 40, 32, 40)
+            setPadding(32, 36, 32, 36)
         }
-        root.addView(statusText, params(bottomMargin = 40))
+        root.addView(statusText, params(bottomMargin = 32))
 
-        // 2. Главные кнопки управления: ВКЛЮЧИТЬ и ВЫКЛЮЧИТЬ
-        val controlsTitle = TextView(this).apply {
-            text = "Управление DNS:"
-            textSize = 15f
+        // 2. Главные кнопки включения и выключения
+        val mainButtonsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
         }
-        root.addView(controlsTitle, params(bottomMargin = 16))
 
         btnEnable = Button(this).apply {
-            text = "✅ ВКЛЮЧИТЬ DNS"
-            textSize = 17f
-            setPadding(24, 32, 24, 32)
+            text = "✅ ВКЛЮЧИТЬ"
+            textSize = 15f
+            setPadding(16, 28, 16, 28)
             setOnClickListener {
-                val server = serverInput.text.toString().trim()
+                val server = DnsHelper.getSavedServer(this@MainActivity)
                 if (DnsHelper.setDnsState(this@MainActivity, true, server)) {
-                    Toast.makeText(this@MainActivity, "DNS включен: $server", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "Подключен: $server", Toast.LENGTH_SHORT).show()
                 } else {
                     showPermissionWarning()
                 }
                 updateUi()
             }
         }
-        root.addView(btnEnable, params(bottomMargin = 16))
 
         btnDisable = Button(this).apply {
-            text = "⛔ ВЫКЛЮЧИТЬ DNS"
-            textSize = 17f
-            setPadding(24, 32, 24, 32)
+            text = "⛔ ВЫКЛЮЧИТЬ"
+            textSize = 15f
+            setPadding(16, 28, 16, 28)
             setOnClickListener {
                 if (DnsHelper.setDnsState(this@MainActivity, false, "")) {
                     Toast.makeText(this@MainActivity, "Персональный DNS выключен", Toast.LENGTH_SHORT).show()
@@ -144,53 +200,82 @@ class MainActivity : Activity() {
                 updateUi()
             }
         }
-        root.addView(btnDisable, params(bottomMargin = 56))
 
-        // 3. Настройка адреса DNS-сервера
-        val labelInput = TextView(this).apply {
-            text = "Используемый адрес DNS-сервера:"
-            textSize = 15f
+        mainButtonsRow.addView(btnEnable, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { rightMargin = 12 })
+        mainButtonsRow.addView(btnDisable, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { leftMargin = 12 })
+        root.addView(mainButtonsRow, params(bottomMargin = 48))
+
+        // 3. Список сохраненных DNS-серверов
+        val listTitle = TextView(this).apply {
+            text = "Мои DNS-серверы (нажми для подключения):"
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
         }
-        root.addView(labelInput, params(bottomMargin = 8))
+        root.addView(listTitle, params(bottomMargin = 16))
 
-        serverInput = EditText(this).apply {
-            hint = "Например, geohide.ru"
-            setText(DnsHelper.getSavedServer(this@MainActivity))
+        serverListContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        root.addView(serverListContainer, params(bottomMargin = 40))
+
+        // 4. Добавление нового сервера в память
+        val addTitle = TextView(this).apply {
+            text = "Добавить новый DNS-сервер в список:"
+            textSize = 15f
+            setTypeface(null, Typeface.BOLD)
+        }
+        root.addView(addTitle, params(bottomMargin = 8))
+
+        newServerInput = EditText(this).apply {
+            hint = "Например: one.one.one.one"
             setSingleLine(true)
         }
-        root.addView(serverInput, params(bottomMargin = 16))
+        root.addView(newServerInput, params(bottomMargin = 12))
 
-        // Быстрые кнопки подстановки популярных серверов
-        val presetsRow = LinearLayout(this).apply {
+        val addButtonsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
-        val presetGeo = Button(this).apply {
-            text = "geohide.ru"
-            textSize = 12f
+
+        val btnAddOnly = Button(this).apply {
+            text = "➕ В список"
+            textSize = 14f
             setOnClickListener {
-                serverInput.setText("geohide.ru")
-                saveAndApplyServer()
+                val addr = newServerInput.text.toString().trim()
+                if (DnsHelper.addServerToList(this@MainActivity, addr)) {
+                    newServerInput.setText("")
+                    Toast.makeText(this@MainActivity, "Добавлен: $addr", Toast.LENGTH_SHORT).show()
+                    updateUi()
+                } else {
+                    Toast.makeText(this@MainActivity, "Введите адрес сервера", Toast.LENGTH_SHORT).show()
+                }
             }
         }
-        val presetAdguard = Button(this).apply {
-            text = "AdGuard DNS"
-            textSize = 12f
+
+        val btnAddAndConnect = Button(this).apply {
+            text = "⚡ Добавить и включить"
+            textSize = 14f
             setOnClickListener {
-                serverInput.setText("dns.adguard-dns.com")
-                saveAndApplyServer()
+                val addr = newServerInput.text.toString().trim()
+                if (addr.isEmpty()) {
+                    Toast.makeText(this@MainActivity, "Введите адрес сервера", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                DnsHelper.addServerToList(this@MainActivity, addr)
+                newServerInput.setText("")
+                if (DnsHelper.setDnsState(this@MainActivity, true, addr)) {
+                    Toast.makeText(this@MainActivity, "Подключен: $addr", Toast.LENGTH_SHORT).show()
+                } else {
+                    showPermissionWarning()
+                }
+                updateUi()
             }
         }
-        presetsRow.addView(presetGeo, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { rightMargin = 8 })
-        presetsRow.addView(presetAdguard, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { leftMargin = 8 })
-        root.addView(presetsRow, params(bottomMargin = 16))
 
-        val saveBtn = Button(this).apply {
-            text = "💾 Сохранить этот адрес"
-            setOnClickListener { saveAndApplyServer() }
-        }
-        root.addView(saveBtn, params(bottomMargin = 48))
+        addButtonsRow.addView(btnAddOnly, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { rightMargin = 8 })
+        addButtonsRow.addView(btnAddAndConnect, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1.3f).apply { leftMargin = 8 })
+        root.addView(addButtonsRow, params(bottomMargin = 48))
 
-        // 4. Блок инструкции ADB (показывается, только если еще не выдано разрешение)
+        // 5. Блок инструкции ADB (автоматически скрывается после выдачи разрешения)
         adbInfoBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 32, 32, 32)
@@ -228,16 +313,68 @@ class MainActivity : Activity() {
         setContentView(scrollView)
     }
 
-    private fun saveAndApplyServer() {
-        val addr = serverInput.text.toString().trim()
-        DnsHelper.saveServer(this, addr)
-        if (DnsHelper.isDnsEnabled(this) && DnsHelper.hasPermission(this)) {
-            DnsHelper.setDnsState(this, true, addr)
-            Toast.makeText(this, "Активный сервер изменен на $addr", Toast.LENGTH_SHORT).show()
-        } else {
-            Toast.makeText(this, "Адрес $addr сохранен для включения", Toast.LENGTH_SHORT).show()
+    private fun renderServerList(enabled: Boolean, activeServer: String, selectedServer: String) {
+        serverListContainer.removeAllViews()
+        val servers = DnsHelper.getServerList(this)
+
+        if (servers.isEmpty()) {
+            val emptyView = TextView(this).apply {
+                text = "Список пуст. Добавьте первый сервер ниже."
+                textSize = 14f
+                setTextColor(Color.GRAY)
+            }
+            serverListContainer.addView(emptyView)
+            return
         }
-        updateUi()
+
+        for (server in servers) {
+            val isCurrentlyActive = enabled && (activeServer.equals(server, ignoreCase = true))
+            val isSelected = selectedServer.equals(server, ignoreCase = true)
+
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+
+            val selectBtn = Button(this).apply {
+                text = when {
+                    isCurrentlyActive -> "🟢 $server  (Подключен)"
+                    isSelected -> "🔘 $server  (Выбран)"
+                    else -> "⚪ $server"
+                }
+                textSize = 14f
+                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                setPadding(32, 24, 32, 24)
+                setOnClickListener {
+                    DnsHelper.saveSelectedServer(this@MainActivity, server)
+                    if (DnsHelper.setDnsState(this@MainActivity, true, server)) {
+                        Toast.makeText(this@MainActivity, "Подключен DNS: $server", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Выбран $server (для авто-включения выдайте разрешение ADB)",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    updateUi()
+                }
+            }
+
+            val deleteBtn = Button(this).apply {
+                text = "✖"
+                textSize = 14f
+                setOnClickListener {
+                    DnsHelper.removeServerFromList(this@MainActivity, server)
+                    Toast.makeText(this@MainActivity, "Удален из списка: $server", Toast.LENGTH_SHORT).show()
+                    updateUi()
+                }
+            }
+
+            row.addView(selectBtn, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { rightMargin = 12 })
+            row.addView(deleteBtn, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+
+            serverListContainer.addView(row, params(bottomMargin = 12))
+        }
     }
 
     private fun showPermissionWarning() {
@@ -264,23 +401,33 @@ class MainActivity : Activity() {
         val enabled = DnsHelper.isDnsEnabled(this)
         val hasPerm = DnsHelper.hasPermission(this)
         val sysServer = DnsHelper.getCurrentSystemServer(this)
-        val savedServer = DnsHelper.getSavedServer(this)
+        val selectedServer = DnsHelper.getSavedServer(this)
+
+        // Если в системе уже прописан какой-то сервер, убедимся, что он тоже сохранен в наш список
+        if (sysServer.isNotEmpty()) {
+            val currentList = DnsHelper.getServerList(this)
+            if (!currentList.contains(sysServer)) {
+                DnsHelper.addServerToList(this, sysServer)
+            }
+        }
+
+        val activeServer = sysServer.ifEmpty { selectedServer }
 
         if (enabled) {
-            val active = sysServer.ifEmpty { savedServer }
-            statusText.text = "🟢 DNS ВКЛЮЧЕН\nСервер: $active"
+            statusText.text = "🟢 DNS ВКЛЮЧЕН\nАктивен: $activeServer"
             statusText.setTextColor(Color.parseColor("#66BB6A"))
             statusText.setBackgroundColor(Color.parseColor("#224CAF50"))
-            btnEnable.isEnabled = (active != serverInput.text.toString().trim())
+            btnEnable.isEnabled = !activeServer.equals(selectedServer, ignoreCase = true)
             btnDisable.isEnabled = true
         } else {
-            statusText.text = "🔴 DNS ВЫКЛЮЧЕН\n(Готов к включению: $savedServer)"
+            statusText.text = "🔴 DNS ВЫКЛЮЧЕН\nВыбран: $selectedServer"
             statusText.setTextColor(Color.parseColor("#EF5350"))
             statusText.setBackgroundColor(Color.parseColor("#22F44336"))
             btnEnable.isEnabled = true
             btnDisable.isEnabled = false
         }
 
+        renderServerList(enabled, activeServer, selectedServer)
         adbInfoBox.visibility = if (hasPerm) View.GONE else View.VISIBLE
     }
 }
