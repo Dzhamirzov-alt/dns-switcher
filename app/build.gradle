@@ -1,3 +1,8 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
 android {
     namespace 'com.example.dnstoggle'
     compileSdk 34
@@ -11,7 +16,9 @@ android {
     }
 
     buildTypes {
-        debug {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
 
@@ -23,4 +30,8 @@ android {
     kotlinOptions {
         jvmTarget = '17'
     }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.12.0'
 }
