@@ -2,6 +2,7 @@ package com.example.dnstoggle
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -42,13 +43,23 @@ object DnsHelper {
                 PackageManager.PERMISSION_GRANTED
     }
 
-    // Режимы: "hostname" (Вкл), "opportunistic" (Авто), "off" (Выкл)
     fun getDnsMode(context: Context): String {
         return Settings.Global.getString(context.contentResolver, "private_dns_mode") ?: "off"
     }
 
     fun getCurrentSystemServer(context: Context): String {
         return Settings.Global.getString(context.contentResolver, "private_dns_specifier")?.trim() ?: ""
+    }
+
+    fun cleanHostInput(rawInput: String): String {
+        var clean = rawInput.trim().lowercase()
+        if (clean.startsWith("https://")) clean = clean.removePrefix("https://")
+        if (clean.startsWith("http://")) clean = clean.removePrefix("http://")
+        val slashIdx = clean.indexOf('/')
+        if (slashIdx != -1) {
+            clean = clean.substring(0, slashIdx)
+        }
+        return clean.trim()
     }
 
     fun getServerEntries(context: Context): List<DnsEntry> {
@@ -72,7 +83,7 @@ object DnsHelper {
         return raw.split("\n")
             .mapNotNull { line ->
                 val parts = line.split("|")
-                val host = parts.getOrNull(0)?.trim() ?: ""
+                val host = cleanHostInput(parts.getOrNull(0) ?: "")
                 val label = parts.getOrNull(1)?.trim() ?: ""
                 if (host.isNotEmpty()) DnsEntry(host, label) else null
             }
@@ -89,7 +100,7 @@ object DnsHelper {
     }
 
     fun addServerToList(context: Context, host: String, label: String): Boolean {
-        val cleanHost = host.trim().lowercase()
+        val cleanHost = cleanHostInput(host)
         val cleanLabel = label.trim()
         if (cleanHost.isEmpty()) return false
 
@@ -104,6 +115,28 @@ object DnsHelper {
         saveServerEntries(context, list)
         saveSelectedServer(context, cleanHost)
         return true
+    }
+
+    fun updateServerInList(context: Context, oldHost: String, newHost: String, newLabel: String): Boolean {
+        val cleanNewHost = cleanHostInput(newHost)
+        val cleanLabel = newLabel.trim()
+        if (cleanNewHost.isEmpty()) return false
+
+        val list = getServerEntries(context).toMutableList()
+        val index = list.indexOfFirst { it.host.equals(oldHost, true) }
+        if (index >= 0) {
+            list[index] = DnsEntry(cleanNewHost, cleanLabel)
+            saveServerEntries(context, list)
+            if (getSavedServer(context).equals(oldHost, true)) {
+                saveSelectedServer(context, cleanNewHost)
+            }
+            val sysServer = getCurrentSystemServer(context)
+            if (sysServer.equals(oldHost, true) && getDnsMode(context) == "hostname") {
+                setDnsMode(context, "hostname", cleanNewHost)
+            }
+            return true
+        }
+        return false
     }
 
     fun removeServerFromList(context: Context, host: String) {
@@ -129,7 +162,7 @@ object DnsHelper {
     }
 
     fun saveSelectedServer(context: Context, server: String) {
-        val clean = server.trim().lowercase().ifEmpty { DEFAULT_SERVER }
+        val clean = cleanHostInput(server).ifEmpty { DEFAULT_SERVER }
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_SELECTED_SERVER, clean)
@@ -153,13 +186,12 @@ object DnsHelper {
             .apply()
     }
 
-    // Установка любого из 3 режимов: "hostname", "opportunistic", "off"
     fun setDnsMode(context: Context, mode: String, server: String = ""): Boolean {
         return try {
             val resolver = context.contentResolver
             when (mode) {
                 "hostname" -> {
-                    val cleanServer = server.trim().lowercase().ifEmpty { getSavedServer(context) }
+                    val cleanServer = cleanHostInput(server).ifEmpty { getSavedServer(context) }
                     saveSelectedServer(context, cleanServer)
                     Settings.Global.putString(resolver, "private_dns_specifier", cleanServer)
                     Settings.Global.putString(resolver, "private_dns_mode", "hostname")
@@ -177,13 +209,12 @@ object DnsHelper {
         }
     }
 
-    // Проверка пинга по порту 853 (DNS-over-TLS) или 443
     fun measurePingMs(host: String): Long {
         for (port in intArrayOf(853, 443)) {
             try {
                 val start = System.currentTimeMillis()
                 Socket().use { socket ->
-                    socket.connect(InetSocketAddress(host, port), 2000)
+                    socket.connect(InetSocketAddress(cleanHostInput(host), port), 2000)
                 }
                 return System.currentTimeMillis() - start
             } catch (_: Exception) {
@@ -206,7 +237,6 @@ class MainActivity : Activity() {
     private lateinit var newServerLabelInput: EditText
     private lateinit var adbInfoBox: LinearLayout
 
-    // Кэш результатов пинга: host -> мс (-1 = ошибка, -2 = проверяется)
     private val pingResults = mutableMapOf<String, Long>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -222,7 +252,6 @@ class MainActivity : Activity() {
             setPadding(44, 44, 44, 72)
         }
 
-        // 1. Карточка статуса со скругленными углами
         statusCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
@@ -242,7 +271,6 @@ class MainActivity : Activity() {
         statusCard.addView(statusSubtitle)
         root.addView(statusCard, params(bottomMargin = 36))
 
-        // 2. Три кнопки режима: ВКЛ / АВТО / ВЫКЛ
         val modeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
@@ -280,7 +308,6 @@ class MainActivity : Activity() {
         modeRow.addView(btnModeOff, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { leftMargin = 10 })
         root.addView(modeRow, params(bottomMargin = 28))
 
-        // 3. Настройка поведения кнопки в шторке уведомлений
         btnTileBehavior = createStyledButton("", "#263238").apply {
             textSize = 13f
             setOnClickListener {
@@ -291,7 +318,6 @@ class MainActivity : Activity() {
         }
         root.addView(btnTileBehavior, params(bottomMargin = 40))
 
-        // 4. Заголовок списка серверов + кнопка проверки пинга
         val listHeaderRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -316,7 +342,6 @@ class MainActivity : Activity() {
         }
         root.addView(serverListContainer, params(bottomMargin = 40))
 
-        // 5. Карточка добавления нового сервера с именем
         val addCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(36, 36, 36, 36)
@@ -359,7 +384,7 @@ class MainActivity : Activity() {
                 if (DnsHelper.addServerToList(this@MainActivity, host, label)) {
                     newServerHostInput.setText("")
                     newServerLabelInput.setText("")
-                    Toast.makeText(this@MainActivity, "Сохранено: $host", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "Сохранено", Toast.LENGTH_SHORT).show()
                     updateUi()
                 } else {
                     Toast.makeText(this@MainActivity, "Введите адрес сервера", Toast.LENGTH_SHORT).show()
@@ -372,14 +397,15 @@ class MainActivity : Activity() {
             setOnClickListener {
                 val host = newServerHostInput.text.toString().trim()
                 val label = newServerLabelInput.text.toString().trim()
+                val cleanHost = DnsHelper.cleanHostInput(host)
                 if (!DnsHelper.addServerToList(this@MainActivity, host, label)) {
                     Toast.makeText(this@MainActivity, "Введите адрес сервера", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
                 newServerHostInput.setText("")
                 newServerLabelInput.setText("")
-                if (DnsHelper.setDnsMode(this@MainActivity, "hostname", host)) {
-                    Toast.makeText(this@MainActivity, "Подключен: $host", Toast.LENGTH_SHORT).show()
+                if (DnsHelper.setDnsMode(this@MainActivity, "hostname", cleanHost)) {
+                    Toast.makeText(this@MainActivity, "Подключен: $cleanHost", Toast.LENGTH_SHORT).show()
                 } else showPermissionWarning()
                 updateUi()
             }
@@ -390,22 +416,21 @@ class MainActivity : Activity() {
         addCard.addView(addButtonsRow)
         root.addView(addCard, params(bottomMargin = 40))
 
-        // 6. Блок инструкции ADB
         adbInfoBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(36, 36, 36, 36)
             background = roundedBg("#2C221E", "#FF9800")
 
-            val adbCommand = "adb shell pm grant com.example.dnstoggle android.permission.WRITE_SECURE_SETTINGS"
+            val adbCommand = "pm grant com.example.dnstoggle android.permission.WRITE_SECURE_SETTINGS"
 
             val infoText = TextView(this@MainActivity).apply {
-                text = "⚠️ Выдайте разрешение один раз через ПК или Brevent:\n\n$adbCommand"
+                text = "⚠️ Выдайте разрешение один раз:\n\n$adbCommand"
                 textSize = 13f
                 setTextColor(Color.parseColor("#FFE0B2"))
             }
             addView(infoText, params(bottomMargin = 20))
 
-            val copyBtn = createStyledButton("📋 Скопировать команду ADB", "#F57C00").apply {
+            val copyBtn = createStyledButton("📋 Скопировать команду", "#F57C00").apply {
                 setOnClickListener {
                     val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                     clipboard.setPrimaryClip(ClipData.newPlainText("ADB", adbCommand))
@@ -430,7 +455,7 @@ class MainActivity : Activity() {
     private fun pingAllServers() {
         val entries = DnsHelper.getServerEntries(this)
         for (entry in entries) {
-            pingResults[entry.host] = -2L // Статус "Проверяется..."
+            pingResults[entry.host] = -2L
         }
         updateUi()
 
@@ -445,9 +470,54 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun showEditDialog(entry: DnsEntry) {
+        val dialogLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 32, 48, 16)
+        }
+
+        val labelInput = EditText(this).apply {
+            setText(entry.label)
+            hint = "Название сервера"
+            setSingleLine(true)
+        }
+        val hostInput = EditText(this).apply {
+            setText(entry.host)
+            hint = "Адрес хоста"
+            setSingleLine(true)
+        }
+
+        dialogLayout.addView(labelInput, params(bottomMargin = 16))
+        dialogLayout.addView(hostInput)
+
+        AlertDialog.Builder(this)
+            .setTitle("Редактировать сервер")
+            .setView(dialogLayout)
+            .setPositiveButton("Сохранить") { _, _ ->
+                val newLabel = labelInput.text.toString()
+                val newHost = hostInput.text.toString()
+                if (DnsHelper.updateServerInList(this, entry.host, newHost, newLabel)) {
+                    Toast.makeText(this, "Сервер обновлен", Toast.LENGTH_SHORT).show()
+                    updateUi()
+                } else {
+                    Toast.makeText(this, "Ошибка: неверный адрес", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
     private fun renderServerList(mode: String, activeServer: String, selectedServer: String) {
         serverListContainer.removeAllViews()
-        val entries = DnsHelper.getServerEntries(this)
+        
+        // Сортировка: самые быстрые (с меньшим пингом > 0) поднимаются наверх
+        val entries = DnsHelper.getServerEntries(this).sortedWith(Comparator { a, b ->
+            val pA = pingResults[a.host] ?: -1L
+            val pB = pingResults[b.host] ?: -1L
+            val valA = if (pA >= 0) pA else 999999L
+            val valB = if (pB >= 0) pB else 999999L
+            valA.compareTo(valB)
+        })
 
         for (entry in entries) {
             val isCurrentlyActive = (mode == "hostname") && activeServer.equals(entry.host, true)
@@ -523,6 +593,13 @@ class MainActivity : Activity() {
                 textCol.addView(tvSub)
             }
 
+            val editBtn = Button(this).apply {
+                text = "✏️"
+                textSize = 12f
+                setBackgroundColor(Color.TRANSPARENT)
+                setOnClickListener { showEditDialog(entry) }
+            }
+
             val deleteBtn = Button(this).apply {
                 text = "✖"
                 textSize = 14f
@@ -536,6 +613,7 @@ class MainActivity : Activity() {
             }
 
             row.addView(textCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            row.addView(editBtn, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
             row.addView(deleteBtn, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
 
             serverListContainer.addView(row, params(bottomMargin = 16))
@@ -563,7 +641,7 @@ class MainActivity : Activity() {
     }
 
     private fun showPermissionWarning() {
-        Toast.makeText(this, "Выдайте разрешение ADB (инструкция внизу)", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, "Выдайте разрешение ADB", Toast.LENGTH_LONG).show()
     }
 
     private fun params(topMargin: Int = 0, bottomMargin: Int = 0): LinearLayout.LayoutParams {
@@ -604,7 +682,7 @@ class MainActivity : Activity() {
             "opportunistic" -> {
                 statusTitle.text = "🔄 РЕЖИМ: АВТОМАТИЧЕСКИ"
                 statusTitle.setTextColor(Color.parseColor("#64B5F6"))
-                statusSubtitle.text = "Системный авто-выбор DNS (выбран: $selectedServer)"
+                statusSubtitle.text = "Системный авто-выбор DNS"
                 statusSubtitle.setTextColor(Color.parseColor("#E3F2FD"))
                 statusCard.background = roundedBg("#1A2B3C", "#42A5F5", 40f)
             }
@@ -641,11 +719,9 @@ class DnsTileService : TileService() {
         val isCycle = DnsHelper.isTileCycleMode(this)
 
         val ok = if (!isCycle) {
-            // Обычный режим: Вкл <-> Выкл
             val enable = (mode != "hostname")
             DnsHelper.setDnsMode(this, if (enable) "hostname" else "off", DnsHelper.getSavedServer(this))
         } else {
-            // Циклический режим по всем серверам из списка -> Выкл
             val entries = DnsHelper.getServerEntries(this)
             if (entries.isEmpty()) {
                 DnsHelper.setDnsMode(this, if (mode == "hostname") "off" else "hostname")
@@ -665,7 +741,7 @@ class DnsTileService : TileService() {
         }
 
         if (!ok) {
-            Toast.makeText(this, "Выдайте разрешение ADB в приложении DNS Switcher", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Выдайте разрешение ADB", Toast.LENGTH_LONG).show()
         }
         refreshTile()
     }
@@ -696,7 +772,7 @@ class DnsTileService : TileService() {
                 tile.state = Tile.STATE_INACTIVE
                 tile.label = "DNS: Выкл"
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    tile.subtitle = DnsHelper.getSavedServer(this)
+                    tile.subtitle = "Выключен"
                 }
             }
         }
