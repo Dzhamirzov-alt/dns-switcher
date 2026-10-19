@@ -12,8 +12,6 @@ android {
 
     buildTypes {
         debug {
-            // Использовать стандартную отладочную подпись (она всегда одинакова на GitHub)
-            useProguard false
         }
     }
 
