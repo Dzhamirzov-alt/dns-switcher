@@ -24,6 +24,13 @@ jobs:
         with:
           gradle-version: '8.5'
 
+      - name: Generate Fixed Keystore
+        run: |
+          KEYSTORE="app/debug.keystore"
+          if [ ! -f "$KEYSTORE" ]; then
+              keytool -genkey -v -keystore "$KEYSTORE" -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
       - name: Build Debug APK
         run: gradle assembleDebug
 
