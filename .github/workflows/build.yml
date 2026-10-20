@@ -5,6 +5,9 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,10 +22,28 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Ensure persistent debug.keystore exists
+        run: |
+          mkdir -p ~/.android
+          if [ -f "app/debug.keystore" ]; then
+            echo "Используем существующий постоянный ключ подписи..."
+            cp app/debug.keystore ~/.android/debug.keystore
+          else
+            echo "Создаем постоянный ключ подписи в первый раз..."
+            keytool -genkey -v -keystore app/debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            cp app/debug.keystore ~/.android/debug.keystore
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add app/debug.keystore
+            git commit -m "Add persistent debug.keystore for seamless updates"
+            git push
+          fi
+
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.5'
+        uses: gradle/actions/setup-gradle@v3
 
       - name: Build Debug APK
         run: gradle assembleDebug
@@ -30,5 +51,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: dns-switcher-apk
+          name: app-debug
           path: app/build/outputs/apk/debug/app-debug.apk
