@@ -327,11 +327,11 @@ class MainActivity : Activity() {
         }
 
         val pingBtn = Button(this).apply {
-            text = "📡 Пинг 853"
-            textSize = 12f
+            text = "📡 Проверка пинг (порт 853)"
+            textSize = 11f
             setTextColor(Color.WHITE)
             isAllCaps = false
-            setPadding(28, 0, 28, 0)
+            setPadding(22, 0, 22, 0)
             background = createRoundRect("#00796B", 20f)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 88)
             setOnClickListener { checkNetworkAndTestAll() }
@@ -782,7 +782,6 @@ class MainActivity : Activity() {
             .show()
     }
 
-    // Вкладка "Популярные DNS-серверы" с горизонтальными разделительными линиями
     private fun showPresetsDialog() {
         var dialogInstance: AlertDialog? = null
 
@@ -1009,7 +1008,6 @@ class MainActivity : Activity() {
         }
     }
 
-    // Вкладка "Бэкап и восстановление" с горизонтальными разделительными линиями
     private fun showBackupDialog() {
         var dialogInstance: AlertDialog? = null
 
@@ -1119,7 +1117,6 @@ class MainActivity : Activity() {
         dialogInstance?.show()
     }
 
-    // Вкладка "Системное разрешение" с кнопкой перехода к подробной инструкции по Shizuku
     private fun showAdbDialog() {
         var dialogInstance: AlertDialog? = null
 
@@ -1170,7 +1167,6 @@ class MainActivity : Activity() {
         infoBox.addView(msgTv)
         rootLayout.addView(infoBox)
 
-        // 1. Кнопка выдачи в 1 клик
         val shizukuGrantBtn = TextView(this).apply {
             text = "⚡ Выдать через Shizuku (1 клик)"
             textSize = 14f
@@ -1188,7 +1184,6 @@ class MainActivity : Activity() {
         }
         rootLayout.addView(shizukuGrantBtn)
 
-        // 2. Вкладка-кнопка "Инструкция по скачиванию и настройке Shizuku"
         val guideBtn = TextView(this).apply {
             text = "📖 Инструкция по скачиванию и настройке Shizuku"
             textSize = 13f
@@ -1207,7 +1202,6 @@ class MainActivity : Activity() {
         }
         rootLayout.addView(guideBtn)
 
-        // 3. Кнопка копирования ADB
         val copyAdbBtn = TextView(this).apply {
             text = "📋 Скопировать команду ADB"
             textSize = 14f
@@ -1226,7 +1220,6 @@ class MainActivity : Activity() {
         }
         rootLayout.addView(copyAdbBtn)
 
-        // 4. Кнопка Закрыть
         val closeBtn = TextView(this).apply {
             text = "Закрыть"
             textSize = 15f
@@ -1248,7 +1241,6 @@ class MainActivity : Activity() {
         dialogInstance?.show()
     }
 
-    // Полная пошаговая инструкция по скачиванию и настройке Shizuku
     private fun showShizukuGuideDialog() {
         var guideDialog: AlertDialog? = null
 
