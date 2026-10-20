@@ -59,7 +59,13 @@ class MainActivity : Activity() {
     private lateinit var rbAuto: RadioButton
     private lateinit var rbOn: RadioButton
     private lateinit var modeTitle: TextView
+    private lateinit var titleApp: TextView
     private var isUpdatingUi = false
+
+    // Конфигурация цветовых тем
+    private var currentThemeKey = "green"
+    private var accentColorHex = "#00E676"
+    private var accentCardBgHex = "#0D2318"
 
     companion object {
         private const val REQ_EXPORT_FILE = 1001
@@ -110,6 +116,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("dns_prefs", Context.MODE_PRIVATE)
+        loadThemePreferences()
         try {
             Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
         } catch (_: Throwable) {}
@@ -128,6 +135,33 @@ class MainActivity : Activity() {
         super.onResume()
         refreshSystemState()
         checkNetworkAndTestAll()
+    }
+
+    private fun loadThemePreferences() {
+        currentThemeKey = prefs.getString("app_theme", "green") ?: "green"
+        when (currentThemeKey) {
+            "green" -> {
+                accentColorHex = "#00E676"
+                accentCardBgHex = "#0D2318"
+            }
+            "blue" -> {
+                accentColorHex = "#00B0FF"
+                accentCardBgHex = "#0A1D2C"
+            }
+            "purple" -> {
+                accentColorHex = "#E040FB"
+                accentCardBgHex = "#230A2C"
+            }
+        }
+    }
+
+    private fun saveAndApplyTheme(themeKey: String) {
+        currentThemeKey = themeKey
+        prefs.edit().putString("app_theme", themeKey).apply()
+        loadThemePreferences()
+        titleApp.setTextColor(Color.parseColor(accentColorHex))
+        refreshSystemState()
+        Toast.makeText(this, "Тема успешно изменена!", Toast.LENGTH_SHORT).show()
     }
 
     private fun hasPermission(): Boolean {
@@ -199,10 +233,10 @@ class MainActivity : Activity() {
             layoutParams = params
         }
 
-        val title = TextView(this).apply {
+        titleApp = TextView(this).apply {
             text = "⚡ DNS SWITCHER PRO"
             textSize = 20f
-            setTextColor(Color.parseColor("#00E676"))
+            setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -216,7 +250,7 @@ class MainActivity : Activity() {
             setOnClickListener { showSettingsDialog() }
         }
 
-        topBar.addView(title)
+        topBar.addView(titleApp)
         topBar.addView(settingsBtn)
         mainLayout.addView(topBar)
 
@@ -391,6 +425,7 @@ class MainActivity : Activity() {
             Pair("➕ Добавить свой сервер", "Ручной ввод хоста и имени"),
             Pair("📚 Популярные DNS-серверы", "Каталог проверенных серверов"),
             Pair("💾 Бэкап и сброс настроек", "Экспорт/импорт JSON, сброс списка"),
+            Pair("🎨 Выбор темы оформления", "Сменить неоновый стиль интерфейса"),
             Pair("🎛️ Режим шторки", if (prefs.getBoolean("tile_simple_toggle", true)) "Сейчас: Обычный тумблер (Вкл/Выкл)" else "Сейчас: Циклический перебор")
         )
 
@@ -410,7 +445,8 @@ class MainActivity : Activity() {
                         0 -> showEditServerDialog(null)
                         1 -> showPresetsDialog()
                         2 -> showBackupDialog()
-                        3 -> {
+                        3 -> showThemeChooserDialog()
+                        4 -> {
                             val isToggle = prefs.getBoolean("tile_simple_toggle", true)
                             prefs.edit().putBoolean("tile_simple_toggle", !isToggle).apply()
                             Toast.makeText(this@MainActivity, "Режим шторки изменен", Toast.LENGTH_SHORT).show()
@@ -441,7 +477,7 @@ class MainActivity : Activity() {
         val closeBtn = TextView(this).apply {
             text = "Закрыть"
             textSize = 15f
-            setTextColor(Color.parseColor("#00E676"))
+            setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             background = createRoundRect("#121418", 22f, "#1E222B")
@@ -458,6 +494,96 @@ class MainActivity : Activity() {
 
         dialogInstance?.window?.setBackgroundDrawableResource(android.R.color.transparent)
         dialogInstance?.show()
+    }
+
+    // Диалог выбора цветовой темы
+    private fun showThemeChooserDialog() {
+        var themeDialog: AlertDialog? = null
+
+        val rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(36, 28, 36, 28)
+            background = createRoundRect("#0F1117", 36f, "#1E222B")
+        }
+
+        val headerBox = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
+            params.setMargins(0, 0, 0, 16)
+            layoutParams = params
+        }
+
+        val titleView = TextView(this).apply {
+            text = "🎨 Выбор темы оформления"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+        headerBox.addView(titleView)
+        rootLayout.addView(headerBox)
+
+        val listBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            setPadding(16, 8, 16, 8)
+        }
+
+        val themes = listOf(
+            Triple("green", "🟢 Neon Green (Классический неон)", "#00E676"),
+            Triple("blue", "🔵 Cyber Blue (Неоновый голубой)", "#00B0FF"),
+            Triple("purple", "🟣 Synthwave Purple (Фиолетовый кибер)", "#E040FB")
+        )
+
+        for ((index, item) in themes.withIndex()) {
+            val isSelected = (currentThemeKey == item.first)
+            val prefix = if (isSelected) "➔ " else ""
+
+            val themeTv = TextView(this).apply {
+                text = "$prefix${item.second}"
+                textSize = 15f
+                setTextColor(if (isSelected) Color.parseColor(item.third) else Color.WHITE)
+                typeface = if (isSelected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                setPadding(20, 26, 20, 26)
+                setOnClickListener {
+                    themeDialog?.dismiss()
+                    saveAndApplyTheme(item.first)
+                }
+            }
+            listBox.addView(themeTv)
+
+            if (index < themes.size - 1) {
+                listBox.addView(createHorizontalDivider())
+            }
+        }
+
+        rootLayout.addView(listBox)
+
+        val backBtn = TextView(this).apply {
+            text = "Назад к настройкам"
+            textSize = 15f
+            setTextColor(Color.parseColor(accentColorHex))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            params.setMargins(0, 16, 0, 0)
+            layoutParams = params
+            setOnClickListener {
+                themeDialog?.dismiss()
+                showSettingsDialog()
+            }
+        }
+        rootLayout.addView(backBtn)
+
+        themeDialog = AlertDialog.Builder(this)
+            .setView(rootLayout)
+            .create()
+
+        themeDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        themeDialog?.show()
     }
 
     private fun createRoundRect(colorHex: String, radius: Float, strokeColor: String? = null): GradientDrawable {
@@ -520,8 +646,7 @@ class MainActivity : Activity() {
 
         val inactiveColor = Color.parseColor("#78909C")
         val redColor = Color.parseColor("#FF5252")
-        val blueColor = Color.parseColor("#00B0FF")
-        val greenColor = Color.parseColor("#00E676")
+        val activeAccentColor = Color.parseColor(accentColorHex)
 
         rbOff.setTextColor(inactiveColor)
         rbOff.typeface = Typeface.DEFAULT
@@ -548,23 +673,23 @@ class MainActivity : Activity() {
             }
             "opportunistic" -> {
                 rbAuto.isChecked = true
-                rbAuto.setTextColor(blueColor)
+                rbAuto.setTextColor(activeAccentColor)
                 rbAuto.typeface = Typeface.DEFAULT_BOLD
-                rbAuto.buttonTintList = ColorStateList.valueOf(blueColor)
+                rbAuto.buttonTintList = ColorStateList.valueOf(activeAccentColor)
 
-                modeCard.background = createRoundRect("#101A24", 30f, "#00B0FF")
+                modeCard.background = createRoundRect(accentCardBgHex, 30f, accentColorHex)
                 modeTitle.text = "СИСТЕМНЫЙ РЕЖИМ: АВТО"
-                modeTitle.setTextColor(blueColor)
+                modeTitle.setTextColor(activeAccentColor)
             }
             "hostname" -> {
                 rbOn.isChecked = true
-                rbOn.setTextColor(greenColor)
+                rbOn.setTextColor(activeAccentColor)
                 rbOn.typeface = Typeface.DEFAULT_BOLD
-                rbOn.buttonTintList = ColorStateList.valueOf(greenColor)
+                rbOn.buttonTintList = ColorStateList.valueOf(activeAccentColor)
 
-                modeCard.background = createRoundRect("#0D2318", 30f, "#00E676")
+                modeCard.background = createRoundRect(accentCardBgHex, 30f, accentColorHex)
                 modeTitle.text = "СИСТЕМНЫЙ РЕЖИМ: ВКЛЮЧЕН"
-                modeTitle.setTextColor(greenColor)
+                modeTitle.setTextColor(activeAccentColor)
             }
             else -> {
                 rbOff.isChecked = true
@@ -595,7 +720,7 @@ class MainActivity : Activity() {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(32, 26, 20, 26)
                 background = if (isSelected) {
-                    createRoundRect("#0D2318", 26f, "#00E676")
+                    createRoundRect(accentCardBgHex, 26f, accentColorHex)
                 } else {
                     createRoundRect("#121418", 26f, "#1E222B")
                 }
@@ -867,7 +992,7 @@ class MainActivity : Activity() {
         val addAllBtn = TextView(this).apply {
             text = "➕ Добавить все недостающие"
             textSize = 14f
-            setTextColor(Color.parseColor("#00B0FF"))
+            setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             background = createRoundRect("#121418", 22f, "#1E222B")
@@ -893,7 +1018,7 @@ class MainActivity : Activity() {
         val closeBtn = TextView(this).apply {
             text = "Закрыть"
             textSize = 15f
-            setTextColor(Color.parseColor("#00E676"))
+            setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             background = createRoundRect("#121418", 22f, "#1E222B")
@@ -1098,7 +1223,7 @@ class MainActivity : Activity() {
         val closeBtn = TextView(this).apply {
             text = "Отмена"
             textSize = 15f
-            setTextColor(Color.parseColor("#00E676"))
+            setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             background = createRoundRect("#121418", 22f, "#1E222B")
@@ -1170,10 +1295,10 @@ class MainActivity : Activity() {
         val shizukuGrantBtn = TextView(this).apply {
             text = "⚡ Выдать через Shizuku (1 клик)"
             textSize = 14f
-            setTextColor(Color.parseColor("#00E676"))
+            setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#0D2318", 22f, "#00E676")
+            background = createRoundRect(accentCardBgHex, 22f, accentColorHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             params.setMargins(0, 0, 0, 12)
             layoutParams = params
@@ -1318,7 +1443,7 @@ class MainActivity : Activity() {
             val stepTitle = TextView(this).apply {
                 text = step.first
                 textSize = 14f
-                setTextColor(Color.parseColor("#00E676"))
+                setTextColor(Color.parseColor(accentColorHex))
                 typeface = Typeface.DEFAULT_BOLD
                 setPadding(0, if (index == 0) 0 else 12, 0, 6)
             }
@@ -1390,7 +1515,7 @@ class MainActivity : Activity() {
         val backBtn = TextView(this).apply {
             text = "Назад к выдаче прав"
             textSize = 15f
-            setTextColor(Color.parseColor("#00E676"))
+            setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             background = createRoundRect("#121418", 22f, "#1E222B")
