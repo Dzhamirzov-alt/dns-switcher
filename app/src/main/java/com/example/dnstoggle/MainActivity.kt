@@ -356,17 +356,6 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.parseColor("#0F1117"))
         }
 
-        // Заголовок по центру
-        val titleView = TextView(this).apply {
-            text = "⚙️ Настройки приложения"
-            textSize = 18f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, 24)
-        }
-        rootLayout.addView(titleView)
-
         val options = listOf(
             Triple("➕ Добавить свой сервер", "Ручной ввод хоста и имени"),
             Triple("📚 Популярные DNS-серверы", "Каталог проверенных серверов"),
@@ -380,7 +369,7 @@ class MainActivity : Activity() {
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(28, 22, 28, 22)
-                background = createRoundRect("#121418", 22f, "#1E222B") // Единая подложка, как у кнопки добавления сервера
+                background = createRoundRect("#121418", 22f, "#1E222B")
                 val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 params.setMargins(0, 0, 0, 14)
                 layoutParams = params
@@ -419,14 +408,23 @@ class MainActivity : Activity() {
             rootLayout.addView(card)
         }
 
+        val titleView = TextView(this).apply {
+            text = "⚙️ Настройки приложения"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(0, 20, 0, 20)
+        }
+
         dialogInstance = AlertDialog.Builder(this)
+            .setCustomTitle(titleView)
             .setView(rootLayout)
             .setNegativeButton("Закрыть", null)
             .create()
 
         dialogInstance?.show()
 
-        // Выравнивание кнопки "Закрыть" по центру
         dialogInstance?.getButton(AlertDialog.BUTTON_NEGATIVE)?.let { btn ->
             val parent = btn.parent as? LinearLayout
             parent?.gravity = Gravity.CENTER
@@ -495,7 +493,6 @@ class MainActivity : Activity() {
             statusBanner.text = "⚠️ Требуется разрешение WRITE_SECURE_SETTINGS.\nНажмите здесь для выдачи через Shizuku в 1 клик."
         }
 
-        // Строгая индикация: цветные кружки и подсветка меняются ТОЛЬКО при активном режиме
         when (mode) {
             "off" -> {
                 rbOff.isChecked = true
@@ -589,7 +586,7 @@ class MainActivity : Activity() {
 
             val indicator = if (isSelected) "🟢" else "⚪"
             val nameTv = TextView(this).apply {
-                text = "$indicator ${server.name}"
+                text = "$indicator${server.name}"
                 textSize = 16f
                 setTextColor(Color.WHITE)
                 typeface = Typeface.DEFAULT_BOLD
@@ -995,119 +992,4 @@ class DnsTileService : TileService() {
     override fun onClick() {
         super.onClick()
         if (checkSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS) != PackageManager.PERMISSION_GRANTED) {
-            Toast.makeText(this, "Сначала выдайте разрешение в приложении", Toast.LENGTH_LONG).show()
-            return
-        }
-
-        val prefs = getSharedPreferences("dns_prefs", Context.MODE_PRIVATE)
-        val isSimpleToggle = prefs.getBoolean("tile_simple_toggle", true)
-
-        val raw = prefs.getString("servers_json", null)
-        val hosts = mutableListOf<Pair<String, String>>()
-        if (!raw.isNullOrEmpty()) {
-            try {
-                val arr = JSONArray(raw)
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    hosts.add(Pair(o.getString("name"), o.getString("host")))
-                }
-            } catch (_: Exception) {}
-        }
-        if (hosts.isEmpty()) {
-            hosts.add(Pair("Comss.one", "dns.comss.one"))
-        }
-
-        val currentMode = Settings.Global.getString(contentResolver, "private_dns_mode") ?: "off"
-        val currentHost = Settings.Global.getString(contentResolver, "private_dns_specifier") ?: ""
-
-        if (isSimpleToggle) {
-            if (currentMode == "off") {
-                val savedHost = prefs.getString("last_active_host", null)
-                val targetHost = when {
-                    !savedHost.isNullOrEmpty() -> savedHost
-                    currentHost.isNotEmpty() -> currentHost
-                    else -> hosts[0].second
-                }
-                Settings.Global.putString(contentResolver, "private_dns_mode", "hostname")
-                Settings.Global.putString(contentResolver, "private_dns_specifier", targetHost)
-            } else {
-                if (currentMode == "hostname" && currentHost.isNotEmpty()) {
-                    prefs.edit().putString("last_active_host", currentHost).apply()
-                }
-                Settings.Global.putString(contentResolver, "private_dns_mode", "off")
-            }
-        } else {
-            when (currentMode) {
-                "off" -> {
-                    Settings.Global.putString(contentResolver, "private_dns_mode", "opportunistic")
-                }
-                "opportunistic" -> {
-                    Settings.Global.putString(contentResolver, "private_dns_mode", "hostname")
-                    Settings.Global.putString(contentResolver, "private_dns_specifier", hosts[0].second)
-                    prefs.edit().putString("last_active_host", hosts[0].second).apply()
-                }
-                "hostname" -> {
-                    val idx = hosts.indexOfFirst { it.second.equals(currentHost, ignoreCase = true) }
-                    if (idx != -1 && idx + 1 < hosts.size) {
-                        val nextHost = hosts[idx + 1].second
-                        Settings.Global.putString(contentResolver, "private_dns_specifier", nextHost)
-                        prefs.edit().putString("last_active_host", nextHost).apply()
-                    } else {
-                        Settings.Global.putString(contentResolver, "private_dns_mode", "off")
-                    }
-                }
-                else -> {
-                    Settings.Global.putString(contentResolver, "private_dns_mode", "off")
-                }
-            }
-        }
-        updateTile()
-    }
-
-    private fun updateTile() {
-        val tile = qsTile ?: return
-        val mode = Settings.Global.getString(contentResolver, "private_dns_mode") ?: "off"
-        val host = Settings.Global.getString(contentResolver, "private_dns_specifier") ?: ""
-
-        val prefs = getSharedPreferences("dns_prefs", Context.MODE_PRIVATE)
-        val raw = prefs.getString("servers_json", null)
-        var matchedName: String? = null
-        if (!raw.isNullOrEmpty()) {
-            try {
-                val arr = JSONArray(raw)
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    if (o.getString("host").equals(host, ignoreCase = true)) {
-                        matchedName = o.getString("name")
-                        break
-                    }
-                }
-            } catch (_: Exception) {}
-        }
-
-        when (mode) {
-            "off" -> {
-                tile.state = Tile.STATE_INACTIVE
-                tile.label = "DNS: Выкл"
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    tile.subtitle = "Отключен"
-                }
-            }
-            "opportunistic" -> {
-                tile.state = Tile.STATE_ACTIVE
-                tile.label = "DNS: Авто"
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    tile.subtitle = "Автоматический"
-                }
-            }
-            "hostname" -> {
-                tile.state = Tile.STATE_ACTIVE
-                tile.label = matchedName ?: "Private DNS"
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    tile.subtitle = if (host.isEmpty()) "Включен" else host
-                }
-            }
-        }
-        tile.updateTile()
-    }
-}
+            Toast.
