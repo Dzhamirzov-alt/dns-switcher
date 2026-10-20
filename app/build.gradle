@@ -19,9 +19,7 @@ android {
         debug {
             def keystoreFile = file('debug.keystore')
             if (!keystoreFile.exists()) {
-                // Автоматически создаем стандартный debug.keystore, если он отсутствует
                 keystoreFile.createNewFile()
-                // Стандартный пароль и алиас отладочного ключа Android
             }
             storeFile keystoreFile
             storePassword 'android'
@@ -47,10 +45,6 @@ android {
 }
 
 dependencies {
-    implementation('dev.rikka.shizuku:api:13.1.5') {
-        exclude group: 'androidx.annotation'
-    }
-    implementation('dev.rikka.shizuku:provider:13.1.5') {
-        exclude group: 'androidx.annotation'
-    }
+    implementation 'dev.rikka.shizuku:api:13.1.5'
+    implementation 'dev.rikka.shizuku:provider:13.1.5'
 }
