@@ -1,19 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.dnstoggle">
 
-    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
 
     <application
         android:allowBackup="true"
-        android:icon="@android:drawable/sym_def_app_icon"
-        android:label="DNS Switcher"
-        android:roundIcon="@android:drawable/sym_def_app_icon"
+        android:icon="@drawable/app_icon"
+        android:roundIcon="@drawable/app_icon"
+        android:label="DNS Switcher Pro"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
-        <!-- Главный экран приложения -->
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -23,17 +23,17 @@
             </intent-filter>
         </activity>
 
-        <!-- Сервис переключения в шторке быстрых настроек -->
         <service
             android:name=".DnsTileService"
             android:exported="true"
+            android:icon="@android:drawable/ic_dialog_info"
+            android:label="Private DNS"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
         </service>
 
-        <!-- Провайдер для прямой работы с Shizuku в 1 клик -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"
@@ -43,5 +43,4 @@
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
     </application>
-
 </manifest>
