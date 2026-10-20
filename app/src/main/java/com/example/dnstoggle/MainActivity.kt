@@ -21,12 +21,18 @@ import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.*
+import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.InetSocketAddress
 import java.net.Socket
-import kotlin.concurrent.thread
 
 data class DnsServer(
     var name: String,
@@ -106,7 +112,6 @@ class MainActivity : Activity() {
             setPadding(36, 36, 36, 40)
         }
 
-        // Заголовок
         val title = TextView(this).apply {
             text = "DNS Switcher"
             textSize = 24f
@@ -116,7 +121,6 @@ class MainActivity : Activity() {
         }
         mainLayout.addView(title)
 
-        // Статус текущей сети и порта 853
         netStatusText = TextView(this).apply {
             text = "Проверка сети..."
             textSize = 13f
@@ -125,7 +129,6 @@ class MainActivity : Activity() {
         }
         mainLayout.addView(netStatusText)
 
-        // Баннер проверки прав ADB / Shizuku
         statusBanner = TextView(this).apply {
             textSize = 13f
             setPadding(30, 24, 30, 24)
@@ -138,7 +141,6 @@ class MainActivity : Activity() {
         }
         mainLayout.addView(statusBanner)
 
-        // Карточка выбора системного режима
         val modeCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 26, 32, 26)
@@ -193,7 +195,7 @@ class MainActivity : Activity() {
                     val target = when {
                         currentHost.isNotEmpty() -> currentHost
                         !lastSaved.isNullOrEmpty() -> lastSaved
-                        else -> serverList.firstOrNull()?.host ?: "dns.comss.one"
+                        else -> if (serverList.isNotEmpty()) serverList[0].host else "dns.comss.one"
                     }
                     applyDnsMode("hostname", target)
                 }
@@ -202,7 +204,6 @@ class MainActivity : Activity() {
         modeCard.addView(modeGroup)
         mainLayout.addView(modeCard)
 
-        // Переключатель режима работы плитки в шторке
         tileModeBtn = Button(this).apply {
             textSize = 13f
             setTextColor(Color.WHITE)
@@ -220,7 +221,6 @@ class MainActivity : Activity() {
         updateTileModeButtonText()
         mainLayout.addView(tileModeBtn)
 
-        // Шапка списка: "Мои DNS-серверы:" + кнопка "📡 Проверить пинг"
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -252,13 +252,11 @@ class MainActivity : Activity() {
         headerRow.addView(pingBtn)
         mainLayout.addView(headerRow)
 
-        // Контейнер для карточек серверов
         listContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
         mainLayout.addView(listContainer)
 
-        // Нижняя кнопка "Добавить новый сервер" (как на скриншоте)
         val addServerBtn = Button(this).apply {
             text = "Добавить новый сервер"
             textSize = 16f
@@ -275,7 +273,6 @@ class MainActivity : Activity() {
         }
         mainLayout.addView(addServerBtn)
 
-        // Дополнительный ряд кнопок: "📚 Популярные" и "💾 Бэкап / Сброс"
         val bottomActionsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             weightSum = 2f
@@ -427,7 +424,7 @@ class MainActivity : Activity() {
 
             val indicator = if (isSelected) "🟢" else "⚪"
             val nameTv = TextView(this).apply {
-                text = "$indicator${server.name}"
+                text = "$indicator ${server.name}"
                 textSize = 17f
                 setTextColor(Color.WHITE)
                 typeface = Typeface.DEFAULT_BOLD
@@ -455,7 +452,6 @@ class MainActivity : Activity() {
             infoLayout.addView(subTv)
             card.addView(infoLayout)
 
-            // Иконка редактирования (карандаш)
             val editBtn = TextView(this).apply {
                 text = "✏️"
                 textSize = 16f
@@ -466,7 +462,6 @@ class MainActivity : Activity() {
                 setOnClickListener { showEditServerDialog(index) }
             }
 
-            // Иконка удаления (крестик)
             val delBtn = TextView(this).apply {
                 text = "✖️"
                 textSize = 16f
@@ -475,4 +470,405 @@ class MainActivity : Activity() {
                 val params = LinearLayout.LayoutParams(95, 95)
                 layoutParams = params
                 setOnClickListener {
-                    serverList.removeAt(
+                    serverList.removeAt(index)
+                    saveServers()
+                    renderServerList()
+                }
+            }
+
+            card.addView(editBtn)
+            card.addView(delBtn)
+            listContainer.addView(card)
+        }
+    }
+
+    private fun checkNetworkAndTestAll() {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val net = cm.activeNetwork
+        val caps = cm.getNetworkCapabilities(net)
+
+        val netType = when {
+            caps == null -> "Нет сети ❌"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi 📶"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "Мобильная сеть 📱"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "VPN 🔒"
+            else -> "Сеть активна 🌐"
+        }
+        netStatusText.text = "$netType • Проверка задержки (порт 853)..."
+
+        for (s in serverList) s.ping = -2
+        renderServerList()
+
+        Thread {
+            val snapshot = serverList.toList()
+            for (server in snapshot) {
+                val startTime = System.currentTimeMillis()
+                var resultPing = -3
+                val socket = Socket()
+                try {
+                    socket.connect(InetSocketAddress(server.host, 853), 2500)
+                    resultPing = (System.currentTimeMillis() - startTime).toInt()
+                } catch (_: Exception) {
+                    resultPing = -3
+                } finally {
+                    try {
+                        socket.close()
+                    } catch (_: Exception) {}
+                }
+                server.ping = resultPing
+            }
+
+            runOnUiThread {
+                serverList.sortWith(Comparator { a, b ->
+                    val pA = if (a.ping > 0) a.ping else Int.MAX_VALUE
+                    val pB = if (b.ping > 0) b.ping else Int.MAX_VALUE
+                    pA.compareTo(pB)
+                })
+                saveServers()
+                val workingCount = serverList.count { it.ping > 0 }
+                netStatusText.text = "$netType • Доступно DoT (853): $workingCount из ${serverList.size}"
+                renderServerList()
+            }
+        }.start()
+    }
+
+    private fun showEditServerDialog(editIndex: Int?) {
+        val idx = editIndex ?: -1
+        val isEdit = idx >= 0
+        val current = if (isEdit) serverList[idx] else null
+
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(50, 40, 50, 20)
+        }
+
+        val nameInput = EditText(this).apply {
+            hint = "Название (например, Comss.one)"
+            setText(current?.name ?: "")
+        }
+
+        val hostInput = EditText(this).apply {
+            hint = "Адрес хоста (например, dns.comss.one)"
+            inputType = InputType.TYPE_TEXT_VARIATION_URI
+            setText(current?.host ?: "")
+        }
+
+        val noteTv = TextView(this).apply {
+            text = "💡 Префиксы https:// или tls:// очищаются автоматически."
+            textSize = 12f
+            setTextColor(Color.GRAY)
+            setPadding(0, 15, 0, 0)
+        }
+
+        layout.addView(nameInput)
+        layout.addView(hostInput)
+        layout.addView(noteTv)
+
+        AlertDialog.Builder(this)
+            .setTitle(if (isEdit) "Редактировать сервер" else "Добавить новый сервер")
+            .setView(layout)
+            .setPositiveButton("Сохранить") { _, _ ->
+                val cleanHost = sanitizeHost(hostInput.text.toString())
+                val rawName = nameInput.text.toString().trim()
+                val cleanName = if (rawName.isEmpty()) cleanHost else rawName
+
+                if (cleanHost.isEmpty()) {
+                    Toast.makeText(this, "Введите адрес сервера", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+
+                if (isEdit) {
+                    serverList[idx].name = cleanName
+                    serverList[idx].host = cleanHost
+                } else {
+                    serverList.add(DnsServer(cleanName, cleanHost))
+                }
+                saveServers()
+                checkNetworkAndTestAll()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun showPresetsDialog() {
+        val names = popularCatalog.map { "${it.name}\n(${it.host})" }.toTypedArray()
+
+        AlertDialog.Builder(this)
+            .setTitle("📚 Популярные DNS-серверы")
+            .setItems(names) { _, which ->
+                val chosen = popularCatalog[which]
+                if (serverList.any { it.host.equals(chosen.host, ignoreCase = true) }) {
+                    Toast.makeText(this, "Уже есть в вашем списке", Toast.LENGTH_SHORT).show()
+                } else {
+                    serverList.add(DnsServer(chosen.name, chosen.host))
+                    saveServers()
+                    checkNetworkAndTestAll()
+                    Toast.makeText(this, "Добавлено: ${chosen.name}", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setPositiveButton("Добавить все недостающие") { _, _ ->
+                var added = 0
+                for (p in popularCatalog) {
+                    if (serverList.none { it.host.equals(p.host, ignoreCase = true) }) {
+                        serverList.add(DnsServer(p.name, p.host))
+                        added++
+                    }
+                }
+                saveServers()
+                checkNetworkAndTestAll()
+                Toast.makeText(this, "Добавлено серверов: $added", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Закрыть", null)
+            .show()
+    }
+
+    private fun showBackupDialog() {
+        val options = arrayOf(
+            "📤 Экспорт (скопировать JSON в буфер)",
+            "📥 Импорт (добавить из буфера обмена)",
+            "🔄 Сбросить к стандартным 7 серверам"
+        )
+
+        AlertDialog.Builder(this)
+            .setTitle("💾 Бэкап и восстановление")
+            .setItems(options) { _, which ->
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                when (which) {
+                    0 -> {
+                        val jsonArray = JSONArray()
+                        for (s in serverList) {
+                            val obj = JSONObject()
+                            obj.put("name", s.name)
+                            obj.put("host", s.host)
+                            jsonArray.put(obj)
+                        }
+                        clipboard.setPrimaryClip(ClipData.newPlainText("dns_backup", jsonArray.toString(2)))
+                        Toast.makeText(this, "Список скопирован в буфер обмена!", Toast.LENGTH_LONG).show()
+                    }
+                    1 -> {
+                        val clipText = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
+                        if (clipText.isEmpty()) {
+                            Toast.makeText(this, "Буфер обмена пуст!", Toast.LENGTH_SHORT).show()
+                            return@setItems
+                        }
+                        try {
+                            val arr = JSONArray(clipText)
+                            var imported = 0
+                            for (i in 0 until arr.length()) {
+                                val obj = arr.getJSONObject(i)
+                                val name = obj.optString("name")
+                                val host = sanitizeHost(obj.optString("host"))
+                                if (host.isNotEmpty() && serverList.none { it.host.equals(host, true) }) {
+                                    val finalName = if (name.isEmpty()) host else name
+                                    serverList.add(DnsServer(finalName, host))
+                                    imported++
+                                }
+                            }
+                            saveServers()
+                            checkNetworkAndTestAll()
+                            Toast.makeText(this, "Импортировано серверов: $imported", Toast.LENGTH_LONG).show()
+                        } catch (_: Exception) {
+                            Toast.makeText(this, "Ошибка формата JSON в буфере!", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    2 -> {
+                        serverList.clear()
+                        for (d in defaultServers) {
+                            serverList.add(DnsServer(d.name, d.host))
+                        }
+                        saveServers()
+                        checkNetworkAndTestAll()
+                        Toast.makeText(this, "Восстановлен стандартный список!", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun showAdbDialog() {
+        val adbCommand = "adb shell pm grant $packageName android.permission.WRITE_SECURE_SETTINGS"
+        val shizukuCommand = "pm grant $packageName android.permission.WRITE_SECURE_SETTINGS"
+
+        val msg = "Для переключения системного DNS требуется однократное разрешение.\n\n" +
+                "Через ПК (ADB):\n$adbCommand\n\n" +
+                "Через Shizuku / LADB / aShell на телефоне:\n$shizukuCommand"
+
+        AlertDialog.Builder(this)
+            .setTitle("🔑 Системное разрешение")
+            .setMessage(msg)
+            .setPositiveButton("Скопировать для ADB") { _, _ ->
+                val cb = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cb.setPrimaryClip(ClipData.newPlainText("adb", adbCommand))
+                Toast.makeText(this, "Команда ADB скопирована", Toast.LENGTH_SHORT).show()
+            }
+            .setNeutralButton("Скопировать для Shizuku") { _, _ ->
+                val cb = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cb.setPrimaryClip(ClipData.newPlainText("shizuku", shizukuCommand))
+                Toast.makeText(this, "Команда для Shizuku скопирована", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Закрыть", null)
+            .show()
+    }
+
+    private fun loadServers() {
+        serverList.clear()
+        val raw = prefs.getString("servers_json", null)
+        if (raw.isNullOrEmpty()) {
+            for (d in defaultServers) {
+                serverList.add(DnsServer(d.name, d.host))
+            }
+            saveServers()
+            return
+        }
+        try {
+            val arr = JSONArray(raw)
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                serverList.add(DnsServer(obj.getString("name"), obj.getString("host")))
+            }
+        } catch (_: Exception) {
+            for (d in defaultServers) {
+                serverList.add(DnsServer(d.name, d.host))
+            }
+        }
+    }
+
+    private fun saveServers() {
+        val arr = JSONArray()
+        for (s in serverList) {
+            val obj = JSONObject()
+            obj.put("name", s.name)
+            obj.put("host", s.host)
+            arr.put(obj)
+        }
+        prefs.edit().putString("servers_json", arr.toString()).apply()
+    }
+}
+
+class DnsTileService : TileService() {
+
+    override fun onStartListening() {
+        super.onStartListening()
+        updateTile()
+    }
+
+    override fun onClick() {
+        super.onClick()
+        if (checkSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS) != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "Выдайте разрешение в приложении DNS Switcher", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val prefs = getSharedPreferences("dns_prefs", Context.MODE_PRIVATE)
+        val isSimpleToggle = prefs.getBoolean("tile_simple_toggle", true)
+
+        val raw = prefs.getString("servers_json", null)
+        val hosts = mutableListOf<Pair<String, String>>()
+        if (!raw.isNullOrEmpty()) {
+            try {
+                val arr = JSONArray(raw)
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    hosts.add(Pair(o.getString("name"), o.getString("host")))
+                }
+            } catch (_: Exception) {}
+        }
+        if (hosts.isEmpty()) {
+            hosts.add(Pair("Comss.one", "dns.comss.one"))
+        }
+
+        val currentMode = Settings.Global.getString(contentResolver, "private_dns_mode") ?: "off"
+        val currentHost = Settings.Global.getString(contentResolver, "private_dns_specifier") ?: ""
+
+        if (isSimpleToggle) {
+            if (currentMode == "off") {
+                val savedHost = prefs.getString("last_active_host", null)
+                val targetHost = when {
+                    !savedHost.isNullOrEmpty() -> savedHost
+                    currentHost.isNotEmpty() -> currentHost
+                    else -> hosts[0].second
+                }
+                Settings.Global.putString(contentResolver, "private_dns_mode", "hostname")
+                Settings.Global.putString(contentResolver, "private_dns_specifier", targetHost)
+            } else {
+                if (currentMode == "hostname" && currentHost.isNotEmpty()) {
+                    prefs.edit().putString("last_active_host", currentHost).apply()
+                }
+                Settings.Global.putString(contentResolver, "private_dns_mode", "off")
+            }
+        } else {
+            when (currentMode) {
+                "off" -> {
+                    Settings.Global.putString(contentResolver, "private_dns_mode", "opportunistic")
+                }
+                "opportunistic" -> {
+                    Settings.Global.putString(contentResolver, "private_dns_mode", "hostname")
+                    Settings.Global.putString(contentResolver, "private_dns_specifier", hosts[0].second)
+                    prefs.edit().putString("last_active_host", hosts[0].second).apply()
+                }
+                "hostname" -> {
+                    val idx = hosts.indexOfFirst { it.second.equals(currentHost, ignoreCase = true) }
+                    if (idx != -1 && idx + 1 < hosts.size) {
+                        val nextHost = hosts[idx + 1].second
+                        Settings.Global.putString(contentResolver, "private_dns_specifier", nextHost)
+                        prefs.edit().putString("last_active_host", nextHost).apply()
+                    } else {
+                        Settings.Global.putString(contentResolver, "private_dns_mode", "off")
+                    }
+                }
+                else -> {
+                    Settings.Global.putString(contentResolver, "private_dns_mode", "off")
+                }
+            }
+        }
+        updateTile()
+    }
+
+    private fun updateTile() {
+        val tile = qsTile ?: return
+        val mode = Settings.Global.getString(contentResolver, "private_dns_mode") ?: "off"
+        val host = Settings.Global.getString(contentResolver, "private_dns_specifier") ?: ""
+
+        val prefs = getSharedPreferences("dns_prefs", Context.MODE_PRIVATE)
+        val raw = prefs.getString("servers_json", null)
+        var matchedName: String? = null
+        if (!raw.isNullOrEmpty()) {
+            try {
+                val arr = JSONArray(raw)
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    if (o.getString("host").equals(host, ignoreCase = true)) {
+                        matchedName = o.getString("name")
+                        break
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        when (mode) {
+            "off" -> {
+                tile.state = Tile.STATE_INACTIVE
+                tile.label = "DNS: Выкл"
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    tile.subtitle = "Отключен"
+                }
+            }
+            "opportunistic" -> {
+                tile.state = Tile.STATE_ACTIVE
+                tile.label = "DNS: Авто"
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    tile.subtitle = "Автоматический"
+                }
+            }
+            "hostname" -> {
+                tile.state = Tile.STATE_ACTIVE
+                tile.label = matchedName ?: "Private DNS"
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    tile.subtitle = if (host.isEmpty()) "Включен" else host
+                }
+            }
+        }
+        tile.updateTile()
+    }
+}
