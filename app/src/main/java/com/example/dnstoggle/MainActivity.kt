@@ -77,7 +77,6 @@ class MainActivity : Activity() {
         }
     }
 
-    // Стандартный список серверов по умолчанию
     private val defaultServers = listOf(
         DnsServer("Comss.one", "dns.comss.one"),
         DnsServer("Мобильная -1", "comss.dns.controld.com"),
@@ -88,7 +87,6 @@ class MainActivity : Activity() {
         DnsServer("Quad9", "dns.quad9.net")
     )
 
-    // Дополнительный каталог для кнопки "Популярные"
     private val popularCatalog = listOf(
         DnsServer("AdGuard DNS (Без рекламы)", "dns.adguard-dns.com"),
         DnsServer("AdGuard Семейный", "family.adguard-dns.com"),
@@ -134,11 +132,10 @@ class MainActivity : Activity() {
         return checkSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED
     }
 
-    // Проверка и запрос прав через Shizuku в 1 клик
     private fun requestShizukuOneClick() {
         try {
             if (!Shizuku.pingBinder()) {
-                Toast.makeText(this, "Shizuku не запущен! Откройте приложение Shizuku и запустите сервис.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Shizuku не запущен! Запустите сервис Shizuku.", Toast.LENGTH_LONG).show()
                 return
             }
             if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
@@ -147,11 +144,10 @@ class MainActivity : Activity() {
                 Shizuku.requestPermission(REQ_SHIZUKU_PERMISSION)
             }
         } catch (e: Throwable) {
-            Toast.makeText(this, "Ошибка обращения к Shizuku: ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Ошибка Shizuku: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
-    // Выполнение команды pm grant напрямую через сервис Shizuku
     private fun grantPermissionViaShizuku() {
         Thread {
             try {
@@ -169,7 +165,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     refreshSystemState()
                     if (hasPermission()) {
-                        Toast.makeText(this, "✅ Разрешение успешно выдано через Shizuku!", Toast.LENGTH_LONG).show()
+                        Toast.makeText(this, "⚡ Права успешно выданы через Shizuku!", Toast.LENGTH_LONG).show()
                     } else {
                         Toast.makeText(this, "Не удалось выдать права (код: $exitCode)", Toast.LENGTH_LONG).show()
                     }
@@ -184,37 +180,44 @@ class MainActivity : Activity() {
 
     private fun setupUI() {
         val rootScroll = ScrollView(this).apply {
-            setBackgroundColor(Color.parseColor("#0F0F0F"))
+            setBackgroundColor(Color.parseColor("#08080A")) // Глубокий кибер-чёрный фон
             isFillViewport = true
         }
 
         val mainLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(36, 36, 36, 40)
+            setPadding(36, 40, 36, 40)
         }
 
+        // Неоновый заголовок
         val title = TextView(this).apply {
-            text = "DNS Switcher"
-            textSize = 24f
-            setTextColor(Color.WHITE)
+            text = "⚡ DNS SWITCHER PRO"
+            textSize = 20f
+            setTextColor(Color.parseColor("#00E676")) // Неоново-зеленый акцент
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, 0, 0, 8)
+            setPadding(0, 0, 0, 12)
         }
         mainLayout.addView(title)
 
+        // Дашборд сети (Статусбар)
         netStatusText = TextView(this).apply {
-            text = "Проверка сети..."
+            text = "Инициализация сети..."
             textSize = 13f
-            setTextColor(Color.parseColor("#9E9E9E"))
-            setPadding(0, 0, 0, 20)
+            setTextColor(Color.parseColor("#B0BEC5"))
+            setPadding(28, 20, 28, 20)
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            params.setMargins(0, 0, 0, 16)
+            layoutParams = params
         }
         mainLayout.addView(netStatusText)
 
+        // Баннер разрешений
         statusBanner = TextView(this).apply {
             textSize = 13f
             setPadding(30, 24, 30, 24)
-            background = createRoundRect("#332200", 24f, "#FF9800")
-            setTextColor(Color.parseColor("#FFCC00"))
+            background = createRoundRect("#261A00", 24f, "#FFB300")
+            setTextColor(Color.parseColor("#FFD54F"))
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             params.setMargins(0, 0, 0, 20)
             layoutParams = params
@@ -222,21 +225,22 @@ class MainActivity : Activity() {
         }
         mainLayout.addView(statusBanner)
 
+        // Панель режимов «Неоновая капсула»
         val modeCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 26, 32, 26)
-            background = createRoundRect("#1C1C1E", 28f, "#2C2C2E")
+            setPadding(28, 24, 28, 24)
+            background = createRoundRect("#121418", 28f, "#1E222B")
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            params.setMargins(0, 0, 0, 18)
+            params.setMargins(0, 0, 0, 16)
             layoutParams = params
         }
 
         val modeTitle = TextView(this).apply {
-            text = "Режим Private DNS:"
-            textSize = 15f
-            setTextColor(Color.WHITE)
+            text = "СИСТЕМНЫЙ РЕЖИМ"
+            textSize = 11f
+            setTextColor(Color.parseColor("#78909C"))
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, 0, 0, 12)
+            setPadding(0, 0, 0, 10)
         }
         modeCard.addView(modeTitle)
 
@@ -256,7 +260,7 @@ class MainActivity : Activity() {
             layoutParams = RadioGroup.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         rbOn = RadioButton(this).apply {
-            text = "Вкл (DNS)"
+            text = "Вкл"
             setTextColor(Color.WHITE)
             layoutParams = RadioGroup.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -285,13 +289,14 @@ class MainActivity : Activity() {
         modeCard.addView(modeGroup)
         mainLayout.addView(modeCard)
 
+        // Кнопка шторки
         tileModeBtn = Button(this).apply {
-            textSize = 13f
-            setTextColor(Color.WHITE)
+            textSize = 12f
+            setTextColor(Color.parseColor("#CFD8DC"))
             isAllCaps = false
-            background = createRoundRect("#1C1C1E", 24f, "#2C2C2E")
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 115)
-            params.setMargins(0, 0, 0, 26)
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            params.setMargins(0, 0, 0, 20)
             layoutParams = params
             setOnClickListener {
                 val isToggle = prefs.getBoolean("tile_simple_toggle", true)
@@ -302,30 +307,31 @@ class MainActivity : Activity() {
         updateTileModeButtonText()
         mainLayout.addView(tileModeBtn)
 
+        // Шапка списка серверов + Пинг
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            params.setMargins(0, 0, 0, 20)
+            params.setMargins(0, 0, 0, 16)
             layoutParams = params
         }
 
         val listHeader = TextView(this).apply {
-            text = "Мои DNS-серверы:"
-            textSize = 18f
-            setTextColor(Color.WHITE)
+            text = "ДОСТУПНЫЕ СЕРВЕРЫ"
+            textSize = 12f
+            setTextColor(Color.parseColor("#78909C"))
             typeface = Typeface.DEFAULT_BOLD
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
         val pingBtn = Button(this).apply {
-            text = "📡 Проверить пинг"
-            textSize = 13f
+            text = "📡 Пинг 853"
+            textSize = 12f
             setTextColor(Color.WHITE)
             isAllCaps = false
-            setPadding(32, 0, 32, 0)
-            background = createRoundRect("#00897B", 22f)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 96)
+            setPadding(28, 0, 28, 0)
+            background = createRoundRect("#00796B", 20f)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 88)
             setOnClickListener { checkNetworkAndTestAll() }
         }
 
@@ -338,22 +344,24 @@ class MainActivity : Activity() {
         }
         mainLayout.addView(listContainer)
 
+        // Кнопка добавления
         val addServerBtn = Button(this).apply {
-            text = "Добавить новый сервер"
-            textSize = 16f
-            setTextColor(Color.WHITE)
+            text = "+ Добавить свой сервер"
+            textSize = 15f
+            setTextColor(Color.parseColor("#00E676"))
             typeface = Typeface.DEFAULT_BOLD
             isAllCaps = false
             gravity = Gravity.START or Gravity.CENTER_VERTICAL
-            setPadding(40, 0, 40, 0)
-            background = createRoundRect("#1C1C1E", 26f, "#2C2C2E")
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 130)
-            params.setMargins(0, 10, 0, 18)
+            setPadding(36, 0, 36, 0)
+            background = createRoundRect("#121418", 24f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120)
+            params.setMargins(0, 10, 0, 16)
             layoutParams = params
             setOnClickListener { showEditServerDialog(null) }
         }
         mainLayout.addView(addServerBtn)
 
+        // Нижний блок кнопок
         val bottomActionsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             weightSum = 2f
@@ -364,24 +372,24 @@ class MainActivity : Activity() {
 
         val popularBtn = Button(this).apply {
             text = "📚 Популярные"
-            textSize = 14f
+            textSize = 13f
             setTextColor(Color.WHITE)
             isAllCaps = false
-            background = createRoundRect("#1565C0", 24f)
-            val params = LinearLayout.LayoutParams(0, 120, 1f)
-            params.setMargins(0, 0, 10, 0)
+            background = createRoundRect("#0D47A1", 22f)
+            val params = LinearLayout.LayoutParams(0, 110, 1f)
+            params.setMargins(0, 0, 8, 0)
             layoutParams = params
             setOnClickListener { showPresetsDialog() }
         }
 
         val backupBtn = Button(this).apply {
             text = "💾 Бэкап / Сброс"
-            textSize = 14f
+            textSize = 13f
             setTextColor(Color.WHITE)
             isAllCaps = false
-            background = createRoundRect("#2C2C2E", 24f)
-            val params = LinearLayout.LayoutParams(0, 120, 1f)
-            params.setMargins(10, 0, 0, 0)
+            background = createRoundRect("#212121", 22f)
+            val params = LinearLayout.LayoutParams(0, 110, 1f)
+            params.setMargins(8, 0, 0, 0)
             layoutParams = params
             setOnClickListener { showBackupDialog() }
         }
@@ -397,9 +405,9 @@ class MainActivity : Activity() {
     private fun updateTileModeButtonText() {
         val isSimpleToggle = prefs.getBoolean("tile_simple_toggle", true)
         tileModeBtn.text = if (isSimpleToggle) {
-            "🎛️ Кнопка в шторке: Обычный тумблер (ВКЛ ↔ ВЫКЛ)"
+            "🎛️ Шторка: Обычный тумблер (ВКЛ ↔ ВЫКЛ)"
         } else {
-            "🎛️ Кнопка в шторке: Перебор серверов по кругу"
+            "🎛️ Шторка: Циклический перебор серверов"
         }
     }
 
@@ -458,7 +466,7 @@ class MainActivity : Activity() {
             statusBanner.visibility = View.GONE
         } else {
             statusBanner.visibility = View.VISIBLE
-            statusBanner.text = "⚠️ Нет разрешения WRITE_SECURE_SETTINGS.\nНажми сюда, чтобы выдать права через Shizuku в 1 клик или скопировать команду ADB."
+            statusBanner.text = "⚠️ Требуется разрешение WRITE_SECURE_SETTINGS.\nНажмите здесь для выдачи через Shizuku в 1 клик."
         }
 
         when (mode) {
@@ -482,14 +490,14 @@ class MainActivity : Activity() {
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(36, 30, 24, 30)
+                setPadding(32, 26, 20, 26)
                 background = if (isSelected) {
-                    createRoundRect("#193823", 28f, "#2E7D32")
+                    createRoundRect("#0D2318", 26f, "#00E676") // Неоново-зеленая рамка для активного
                 } else {
-                    createRoundRect("#1C1C1E", 28f, "#2C2C2E")
+                    createRoundRect("#121418", 26f, "#1E222B")
                 }
                 val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                params.setMargins(0, 0, 0, 18)
+                params.setMargins(0, 0, 0, 14)
                 layoutParams = params
 
                 setOnClickListener {
@@ -506,27 +514,27 @@ class MainActivity : Activity() {
             val indicator = if (isSelected) "🟢" else "⚪"
             val nameTv = TextView(this).apply {
                 text = "$indicator ${server.name}"
-                textSize = 17f
+                textSize = 16f
                 setTextColor(Color.WHITE)
                 typeface = Typeface.DEFAULT_BOLD
             }
 
-            val statusSuffix = if (isSelected) " (Подключен)" else ""
+            val statusSuffix = if (isSelected) " (Активен)" else ""
             val pingPart = when (server.ping) {
                 -1 -> ""
                 -2 -> " • ⏳..."
-                -3 -> " • ❌ Недоступен (853)"
+                -3 -> " • ❌ Блок (853)"
                 else -> " • ⚡ ${server.ping} мс"
             }
 
             val subTv = TextView(this).apply {
                 text = "${server.host}$statusSuffix$pingPart"
-                textSize = 14f
+                textSize = 13f
                 setTextColor(
-                    if (server.ping == -3) Color.parseColor("#EF5350")
-                    else Color.parseColor("#9E9E9E")
+                    if (server.ping == -3) Color.parseColor("#FF5252")
+                    else Color.parseColor("#90A4AE")
                 )
-                setPadding(0, 8, 0, 0)
+                setPadding(0, 6, 0, 0)
             }
 
             infoLayout.addView(nameTv)
@@ -535,20 +543,20 @@ class MainActivity : Activity() {
 
             val editBtn = TextView(this).apply {
                 text = "✏️"
-                textSize = 16f
+                textSize = 15f
                 gravity = Gravity.CENTER
-                val params = LinearLayout.LayoutParams(95, 95)
-                params.setMargins(8, 0, 8, 0)
+                val params = LinearLayout.LayoutParams(88, 88)
+                params.setMargins(6, 0, 6, 0)
                 layoutParams = params
                 setOnClickListener { showEditServerDialog(index) }
             }
 
             val delBtn = TextView(this).apply {
                 text = "✖️"
-                textSize = 16f
-                setTextColor(Color.parseColor("#EF5350"))
+                textSize = 14f
+                setTextColor(Color.parseColor("#FF5252"))
                 gravity = Gravity.CENTER
-                val params = LinearLayout.LayoutParams(95, 95)
+                val params = LinearLayout.LayoutParams(88, 88)
                 layoutParams = params
                 setOnClickListener {
                     serverList.removeAt(index)
@@ -575,7 +583,7 @@ class MainActivity : Activity() {
             caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "VPN 🔒"
             else -> "Сеть активна 🌐"
         }
-        netStatusText.text = "$netType • Проверка задержки (порт 853)..."
+        netStatusText.text = "$netType • Проверка порта 853..."
 
         for (s in serverList) s.ping = -2
         renderServerList()
@@ -745,7 +753,7 @@ class MainActivity : Activity() {
             }
             startActivityForResult(intent, REQ_EXPORT_FILE)
         } catch (e: Exception) {
-            Toast.makeText(this, "Ошибка открытия проводника: ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Ошибка: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -757,7 +765,7 @@ class MainActivity : Activity() {
             }
             startActivityForResult(intent, REQ_IMPORT_FILE)
         } catch (e: Exception) {
-            Toast.makeText(this, "Ошибка открытия проводника: ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Ошибка: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -777,7 +785,7 @@ class MainActivity : Activity() {
                     Toast.makeText(this, "✅ Бэкап сохранён в файл!", Toast.LENGTH_LONG).show()
                 }
             } catch (e: Exception) {
-                Toast.makeText(this, "Ошибка сохранения файла: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Ошибка: ${e.message}", Toast.LENGTH_LONG).show()
             }
         } else if (requestCode == REQ_IMPORT_FILE) {
             try {
@@ -795,7 +803,7 @@ class MainActivity : Activity() {
                     importServersFromJsonString(sb.toString())
                 }
             } catch (e: Exception) {
-                Toast.makeText(this, "Ошибка чтения файла: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Ошибка: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -804,8 +812,8 @@ class MainActivity : Activity() {
         val options = arrayOf(
             "💾 Сохранить бэкап в файл (.json)",
             "📂 Загрузить бэкап из файла (.json)",
-            "📤 Скопировать JSON в буфер обмена",
-            "📥 Вставить JSON из буфера обмена",
+            "📤 Скопировать JSON в буфер",
+            "📥 Вставить JSON из буфера",
             "🔄 Сбросить к стандартным 7 серверам"
         )
 
@@ -818,12 +826,12 @@ class MainActivity : Activity() {
                     1 -> importBackupFromFile()
                     2 -> {
                         clipboard.setPrimaryClip(ClipData.newPlainText("dns_backup", buildBackupJsonString()))
-                        Toast.makeText(this, "Список скопирован в буфер обмена!", Toast.LENGTH_LONG).show()
+                        Toast.makeText(this, "Скопировано в буфер!", Toast.LENGTH_LONG).show()
                     }
                     3 -> {
                         val clipText = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
                         if (clipText.isEmpty()) {
-                            Toast.makeText(this, "Буфер обмена пуст!", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this, "Буфер пуст!", Toast.LENGTH_SHORT).show()
                         } else {
                             importServersFromJsonString(clipText)
                         }
@@ -835,7 +843,7 @@ class MainActivity : Activity() {
                         }
                         saveServers()
                         checkNetworkAndTestAll()
-                        Toast.makeText(this, "Восстановлен стандартный список!", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, "Список сброшен!", Toast.LENGTH_SHORT).show()
                     }
                 }
             }
@@ -847,20 +855,20 @@ class MainActivity : Activity() {
         val adbCommand = "adb shell pm grant $packageName android.permission.WRITE_SECURE_SETTINGS"
         val shizukuCommand = "pm grant $packageName android.permission.WRITE_SECURE_SETTINGS"
 
-        val msg = "Вы можете выдать разрешение в 1 клик напрямую через запущенный Shizuku или вручную через консоль:\n\n" +
-                "Через ПК (ADB):\n$adbCommand\n\n" +
-                "Через терминал (aShell / LADB):\n$shizukuCommand"
+        val msg = "Вы можете выдать разрешение в 1 клик через Shizuku или через консоль:\n\n" +
+                "ADB:\n$adbCommand\n\n" +
+                "Терминал (aShell/LADB):\n$shizukuCommand"
 
         AlertDialog.Builder(this)
             .setTitle("🔑 Системное разрешение")
             .setMessage(msg)
-            .setPositiveButton("⚡ Выдать через Shizuku (в 1 клик)") { _, _ ->
+            .setPositiveButton("⚡ Выдать через Shizuku (1 клик)") { _, _ ->
                 requestShizukuOneClick()
             }
-            .setNeutralButton("Скопировать для ADB") { _, _ ->
+            .setNeutralButton("Копировать ADB") { _, _ ->
                 val cb = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 cb.setPrimaryClip(ClipData.newPlainText("adb", adbCommand))
-                Toast.makeText(this, "Команда ADB скопирована", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Скопировано", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Закрыть", null)
             .show()
@@ -911,7 +919,7 @@ class DnsTileService : TileService() {
     override fun onClick() {
         super.onClick()
         if (checkSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS) != PackageManager.PERMISSION_GRANTED) {
-            Toast.makeText(this, "Выдайте разрешение в приложении DNS Switcher", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Сначала выдайте разрешение в приложении", Toast.LENGTH_LONG).show()
             return
         }
 
