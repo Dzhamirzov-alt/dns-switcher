@@ -137,7 +137,7 @@ class MainActivity : Activity() {
     private fun requestShizukuOneClick() {
         try {
             if (!Shizuku.pingBinder()) {
-                Toast.makeText(this, "Shizuku не запущен! Запустите сервис Shizuku.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Shizuku не запущен! Откройте инструкцию для настройки.", Toast.LENGTH_LONG).show()
                 return
             }
             if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
@@ -350,6 +350,15 @@ class MainActivity : Activity() {
         setContentView(rootScroll)
     }
 
+    private fun createHorizontalDivider(): View {
+        return View(this).apply {
+            setBackgroundColor(Color.parseColor("#262B36"))
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 3)
+            params.setMargins(12, 4, 12, 4)
+            layoutParams = params
+        }
+    }
+
     private fun showSettingsDialog() {
         var dialogInstance: AlertDialog? = null
 
@@ -359,7 +368,6 @@ class MainActivity : Activity() {
             background = createRoundRect("#0F1117", 36f, "#1E222B")
         }
 
-        // Заголовок строго по центру вертикально и горизонтально
         val headerBox = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -391,7 +399,6 @@ class MainActivity : Activity() {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(28, 22, 28, 22)
-                // Единый цвет подложки для всех пунктов, как у кнопки "Добавить свой сервер"
                 background = createRoundRect("#121418", 22f, "#1E222B")
                 val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 params.setMargins(0, 0, 0, 14)
@@ -431,7 +438,6 @@ class MainActivity : Activity() {
             rootLayout.addView(card)
         }
 
-        // Кнопка "Закрыть" строго по центру вертикально и горизонтально
         val closeBtn = TextView(this).apply {
             text = "Закрыть"
             textSize = 15f
@@ -517,7 +523,6 @@ class MainActivity : Activity() {
         val blueColor = Color.parseColor("#00B0FF")
         val greenColor = Color.parseColor("#00E676")
 
-        // Сначала сбрасываем все радиокнопки в спокойный серый цвет
         rbOff.setTextColor(inactiveColor)
         rbOff.typeface = Typeface.DEFAULT
         rbOff.buttonTintList = ColorStateList.valueOf(inactiveColor)
@@ -530,7 +535,6 @@ class MainActivity : Activity() {
         rbOn.typeface = Typeface.DEFAULT
         rbOn.buttonTintList = ColorStateList.valueOf(inactiveColor)
 
-        // Зажигаем своим цветом ТОЛЬКО активный кружок, его текст и рамку основной кнопки
         when (mode) {
             "off" -> {
                 rbOff.isChecked = true
@@ -778,23 +782,100 @@ class MainActivity : Activity() {
             .show()
     }
 
+    // Вкладка "Популярные DNS-серверы" с горизонтальными разделительными линиями
     private fun showPresetsDialog() {
-        val names = popularCatalog.map { "${it.name}\n(${it.host})" }.toTypedArray()
+        var dialogInstance: AlertDialog? = null
 
-        AlertDialog.Builder(this)
-            .setTitle("📚 Популярные DNS-серверы")
-            .setItems(names) { _, which ->
-                val chosen = popularCatalog[which]
-                if (serverList.any { it.host.equals(chosen.host, ignoreCase = true) }) {
-                    Toast.makeText(this, "Уже есть в вашем списке", Toast.LENGTH_SHORT).show()
-                } else {
-                    serverList.add(DnsServer(chosen.name, chosen.host))
-                    saveServers()
-                    checkNetworkAndTestAll()
-                    Toast.makeText(this, "Добавлено: ${chosen.name}", Toast.LENGTH_SHORT).show()
+        val rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(36, 28, 36, 28)
+            background = createRoundRect("#0F1117", 36f, "#1E222B")
+        }
+
+        val headerBox = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
+            params.setMargins(0, 0, 0, 16)
+            layoutParams = params
+        }
+
+        val titleView = TextView(this).apply {
+            text = "📚 Популярные DNS-серверы"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+        headerBox.addView(titleView)
+        rootLayout.addView(headerBox)
+
+        val scrollView = ScrollView(this).apply {
+            val maxHeight = (resources.displayMetrics.heightPixels * 0.50).toInt()
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxHeight)
+        }
+
+        val listBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            setPadding(16, 8, 16, 8)
+        }
+
+        for ((index, chosen) in popularCatalog.withIndex()) {
+            val itemLayout = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(20, 22, 20, 22)
+                setOnClickListener {
+                    if (serverList.any { it.host.equals(chosen.host, ignoreCase = true) }) {
+                        Toast.makeText(this@MainActivity, "Уже есть в вашем списке", Toast.LENGTH_SHORT).show()
+                    } else {
+                        serverList.add(DnsServer(chosen.name, chosen.host))
+                        saveServers()
+                        checkNetworkAndTestAll()
+                        Toast.makeText(this@MainActivity, "Добавлено: ${chosen.name}", Toast.LENGTH_SHORT).show()
+                        dialogInstance?.dismiss()
+                    }
                 }
             }
-            .setPositiveButton("Добавить все недостающие") { _, _ ->
+
+            val nameTv = TextView(this).apply {
+                text = chosen.name
+                textSize = 15f
+                setTextColor(Color.WHITE)
+                typeface = Typeface.DEFAULT_BOLD
+            }
+
+            val hostTv = TextView(this).apply {
+                text = chosen.host
+                textSize = 13f
+                setTextColor(Color.parseColor("#90A4AE"))
+                setPadding(0, 4, 0, 0)
+            }
+
+            itemLayout.addView(nameTv)
+            itemLayout.addView(hostTv)
+            listBox.addView(itemLayout)
+
+            if (index < popularCatalog.size - 1) {
+                listBox.addView(createHorizontalDivider())
+            }
+        }
+
+        scrollView.addView(listBox)
+        rootLayout.addView(scrollView)
+
+        val addAllBtn = TextView(this).apply {
+            text = "➕ Добавить все недостающие"
+            textSize = 14f
+            setTextColor(Color.parseColor("#00B0FF"))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            params.setMargins(0, 16, 0, 10)
+            layoutParams = params
+            setOnClickListener {
                 var added = 0
                 for (p in popularCatalog) {
                     if (serverList.none { it.host.equals(p.host, ignoreCase = true) }) {
@@ -804,10 +885,31 @@ class MainActivity : Activity() {
                 }
                 saveServers()
                 checkNetworkAndTestAll()
-                Toast.makeText(this, "Добавлено серверов: $added", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, "Добавлено серверов: $added", Toast.LENGTH_LONG).show()
+                dialogInstance?.dismiss()
             }
-            .setNegativeButton("Закрыть", null)
-            .show()
+        }
+        rootLayout.addView(addAllBtn)
+
+        val closeBtn = TextView(this).apply {
+            text = "Закрыть"
+            textSize = 15f
+            setTextColor(Color.parseColor("#00E676"))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            layoutParams = params
+            setOnClickListener { dialogInstance?.dismiss() }
+        }
+        rootLayout.addView(closeBtn)
+
+        dialogInstance = AlertDialog.Builder(this)
+            .setView(rootLayout)
+            .create()
+
+        dialogInstance?.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        dialogInstance?.show()
     }
 
     private fun buildBackupJsonString(): String {
@@ -907,8 +1009,42 @@ class MainActivity : Activity() {
         }
     }
 
+    // Вкладка "Бэкап и восстановление" с горизонтальными разделительными линиями
     private fun showBackupDialog() {
-        val options = arrayOf(
+        var dialogInstance: AlertDialog? = null
+
+        val rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(36, 28, 36, 28)
+            background = createRoundRect("#0F1117", 36f, "#1E222B")
+        }
+
+        val headerBox = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
+            params.setMargins(0, 0, 0, 16)
+            layoutParams = params
+        }
+
+        val titleView = TextView(this).apply {
+            text = "💾 Бэкап и восстановление"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+        headerBox.addView(titleView)
+        rootLayout.addView(headerBox)
+
+        val listBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            setPadding(16, 8, 16, 8)
+        }
+
+        val options = listOf(
             "💾 Сохранить бэкап в файл (.json)",
             "📂 Загрузить бэкап из файла (.json)",
             "📤 Скопировать JSON в буфер",
@@ -916,61 +1052,371 @@ class MainActivity : Activity() {
             "🔄 Сбросить к стандартным 7 серверам"
         )
 
-        AlertDialog.Builder(this)
-            .setTitle("💾 Бэкап и восстановление")
-            .setItems(options) { _, which ->
-                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                when (which) {
-                    0 -> exportBackupToFile()
-                    1 -> importBackupFromFile()
-                    2 -> {
-                        clipboard.setPrimaryClip(ClipData.newPlainText("dns_backup", buildBackupJsonString()))
-                        Toast.makeText(this, "Скопировано в буфер!", Toast.LENGTH_LONG).show()
-                    }
-                    3 -> {
-                        val clipText = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
-                        if (clipText.isEmpty()) {
-                            Toast.makeText(this, "Буфер пуст!", Toast.LENGTH_SHORT).show()
-                        } else {
-                            importServersFromJsonString(clipText)
+        for ((which, label) in options.withIndex()) {
+            val itemTv = TextView(this).apply {
+                text = label
+                textSize = 15f
+                setTextColor(Color.WHITE)
+                setPadding(20, 26, 20, 26)
+                setOnClickListener {
+                    dialogInstance?.dismiss()
+                    val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    when (which) {
+                        0 -> exportBackupToFile()
+                        1 -> importBackupFromFile()
+                        2 -> {
+                            clipboard.setPrimaryClip(ClipData.newPlainText("dns_backup", buildBackupJsonString()))
+                            Toast.makeText(this@MainActivity, "Скопировано в буфер!", Toast.LENGTH_LONG).show()
                         }
-                    }
-                    4 -> {
-                        serverList.clear()
-                        for (d in defaultServers) {
-                            serverList.add(DnsServer(d.name, d.host))
+                        3 -> {
+                            val clipText = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
+                            if (clipText.isEmpty()) {
+                                Toast.makeText(this@MainActivity, "Буфер пуст!", Toast.LENGTH_SHORT).show()
+                            } else {
+                                importServersFromJsonString(clipText)
+                            }
                         }
-                        saveServers()
-                        checkNetworkAndTestAll()
-                        Toast.makeText(this, "Список сброшен!", Toast.LENGTH_SHORT).show()
+                        4 -> {
+                            serverList.clear()
+                            for (d in defaultServers) {
+                                serverList.add(DnsServer(d.name, d.host))
+                            }
+                            saveServers()
+                            checkNetworkAndTestAll()
+                            Toast.makeText(this@MainActivity, "Список сброшен!", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             }
-            .setNegativeButton("Отмена", null)
-            .show()
+            listBox.addView(itemTv)
+
+            if (which < options.size - 1) {
+                listBox.addView(createHorizontalDivider())
+            }
+        }
+
+        rootLayout.addView(listBox)
+
+        val closeBtn = TextView(this).apply {
+            text = "Отмена"
+            textSize = 15f
+            setTextColor(Color.parseColor("#00E676"))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            params.setMargins(0, 16, 0, 0)
+            layoutParams = params
+            setOnClickListener { dialogInstance?.dismiss() }
+        }
+        rootLayout.addView(closeBtn)
+
+        dialogInstance = AlertDialog.Builder(this)
+            .setView(rootLayout)
+            .create()
+
+        dialogInstance?.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        dialogInstance?.show()
     }
 
+    // Вкладка "Системное разрешение" с кнопкой перехода к подробной инструкции по Shizuku
     private fun showAdbDialog() {
+        var dialogInstance: AlertDialog? = null
+
         val adbCommand = "adb shell pm grant $packageName android.permission.WRITE_SECURE_SETTINGS"
         val shizukuCommand = "pm grant $packageName android.permission.WRITE_SECURE_SETTINGS"
 
-        val msg = "Вы можете выдать разрешение в 1 клик через Shizuku или через консоль:\n\n" +
-                "ADB:\n$adbCommand\n\n" +
-                "Терминал (aShell/LADB):\n$shizukuCommand"
+        val rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(36, 28, 36, 28)
+            background = createRoundRect("#0F1117", 36f, "#1E222B")
+        }
 
-        AlertDialog.Builder(this)
-            .setTitle("🔑 Системное разрешение")
-            .setMessage(msg)
-            .setPositiveButton("⚡ Выдать через Shizuku (1 клик)") { _, _ ->
+        val headerBox = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
+            params.setMargins(0, 0, 0, 16)
+            layoutParams = params
+        }
+
+        val titleView = TextView(this).apply {
+            text = "🔑 Системное разрешение"
+            textSize = 17f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+        headerBox.addView(titleView)
+        rootLayout.addView(headerBox)
+
+        val infoBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            setPadding(28, 22, 28, 22)
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            params.setMargins(0, 0, 0, 16)
+            layoutParams = params
+        }
+
+        val msgTv = TextView(this).apply {
+            text = "Вы можете выдать разрешение в 1 клик через Shizuku или через консоль:\n\n" +
+                    "ADB:\n$adbCommand\n\n" +
+                    "Терминал (aShell/LADB):\n$shizukuCommand"
+            textSize = 13f
+            setTextColor(Color.parseColor("#CFD8DC"))
+        }
+        infoBox.addView(msgTv)
+        rootLayout.addView(infoBox)
+
+        // 1. Кнопка выдачи в 1 клик
+        val shizukuGrantBtn = TextView(this).apply {
+            text = "⚡ Выдать через Shizuku (1 клик)"
+            textSize = 14f
+            setTextColor(Color.parseColor("#00E676"))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#0D2318", 22f, "#00E676")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            params.setMargins(0, 0, 0, 12)
+            layoutParams = params
+            setOnClickListener {
+                dialogInstance?.dismiss()
                 requestShizukuOneClick()
             }
-            .setNeutralButton("Копировать ADB") { _, _ ->
+        }
+        rootLayout.addView(shizukuGrantBtn)
+
+        // 2. Вкладка-кнопка "Инструкция по скачиванию и настройке Shizuku"
+        val guideBtn = TextView(this).apply {
+            text = "📖 Инструкция по скачиванию и настройке Shizuku"
+            textSize = 13f
+            setTextColor(Color.parseColor("#00B0FF"))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(20, 0, 20, 0)
+            background = createRoundRect("#101A24", 22f, "#00B0FF")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 115)
+            params.setMargins(0, 0, 0, 12)
+            layoutParams = params
+            setOnClickListener {
+                dialogInstance?.dismiss()
+                showShizukuGuideDialog()
+            }
+        }
+        rootLayout.addView(guideBtn)
+
+        // 3. Кнопка копирования ADB
+        val copyAdbBtn = TextView(this).apply {
+            text = "📋 Скопировать команду ADB"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            params.setMargins(0, 0, 0, 12)
+            layoutParams = params
+            setOnClickListener {
                 val cb = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 cb.setPrimaryClip(ClipData.newPlainText("adb", adbCommand))
-                Toast.makeText(this, "Скопировано", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "Команда скопирована", Toast.LENGTH_SHORT).show()
             }
-            .setNegativeButton("Закрыть", null)
-            .show()
+        }
+        rootLayout.addView(copyAdbBtn)
+
+        // 4. Кнопка Закрыть
+        val closeBtn = TextView(this).apply {
+            text = "Закрыть"
+            textSize = 15f
+            setTextColor(Color.parseColor("#90A4AE"))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            layoutParams = params
+            setOnClickListener { dialogInstance?.dismiss() }
+        }
+        rootLayout.addView(closeBtn)
+
+        dialogInstance = AlertDialog.Builder(this)
+            .setView(rootLayout)
+            .create()
+
+        dialogInstance?.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        dialogInstance?.show()
+    }
+
+    // Полная пошаговая инструкция по скачиванию и настройке Shizuku
+    private fun showShizukuGuideDialog() {
+        var guideDialog: AlertDialog? = null
+
+        val rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(36, 28, 36, 28)
+            background = createRoundRect("#0F1117", 36f, "#1E222B")
+        }
+
+        val headerBox = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
+            params.setMargins(0, 0, 0, 16)
+            layoutParams = params
+        }
+
+        val titleView = TextView(this).apply {
+            text = "📖 Инструкция по Shizuku"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+        headerBox.addView(titleView)
+        rootLayout.addView(headerBox)
+
+        val scrollView = ScrollView(this).apply {
+            val maxHeight = (resources.displayMetrics.heightPixels * 0.55).toInt()
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxHeight)
+        }
+
+        val stepsBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            setPadding(24, 20, 24, 20)
+        }
+
+        val steps = listOf(
+            Pair(
+                "ШАГ 1. Скачивание и установка",
+                "Установите приложение Shizuku из Google Play или с официального GitHub (кнопки для скачивания находятся внизу этого окна)."
+            ),
+            Pair(
+                "ШАГ 2. Включение режима разработчика",
+                "1. Откройте «Настройки» телефона → «О телефоне» (или «Сведения о ПО»).\n" +
+                "2. Быстро нажмите 7 раз подряд на пункт «Номер сборки» (на Xiaomi — на «Версия MIUI/HyperOS»), пока не появится сообщение «Вы стали разработчиком!»."
+            ),
+            Pair(
+                "ШАГ 3. Настройка отладки по Wi-Fi",
+                "1. Подключите телефон к любой сети Wi-Fi.\n" +
+                "2. Перейдите в «Настройки» → «Система» (или «Расширенные настройки») → «Для разработчиков».\n" +
+                "3. Включите тумблер «Отладка по USB».\n" +
+                "4. Ниже включите тумблер «Отладка по Wi-Fi» (на Xiaomi также включите пункт «Отладка по USB (Настройки безопасности)»)."
+            ),
+            Pair(
+                "ШАГ 4. Сопряжение Shizuku с телефоном",
+                "1. Откройте приложение Shizuku и в разделе «Запуск через отладку по Wi-Fi» нажмите кнопку «Сопряжение» (Pairing).\n" +
+                "2. Разрешите Shizuku отправку уведомлений.\n" +
+                "3. Нажмите «Параметры разработчика» → выберите пункт «Отладка по Wi-Fi» → нажмите «Подключить устройство с помощью кода сопряжения».\n" +
+                "4. На экране появится 6-значный код. Протяните шторку уведомлений сверху и введите этот 6-значный код прямо в уведомление от Shizuku."
+            ),
+            Pair(
+                "ШАГ 5. Запуск сервиса Shizuku",
+                "Вернитесь в приложение Shizuku и нажмите кнопку «Запустить» (Start). Подождите 3–5 секунд, пока статус вверху не сменится на «Shizuku запущен»."
+            ),
+            Pair(
+                "ШАГ 6. Выдача прав в 1 клик",
+                "Вернитесь в DNS Switcher Pro, нажмите на жёлтый баннер разрешения → «⚡ Выдать через Shizuku (1 клик)» и нажмите «Разрешить всегда» во всплывающем окне. Готово! Перезагружать телефон не нужно, а права сохранятся навсегда."
+            )
+        )
+
+        for ((index, step) in steps.withIndex()) {
+            val stepTitle = TextView(this).apply {
+                text = step.first
+                textSize = 14f
+                setTextColor(Color.parseColor("#00E676"))
+                typeface = Typeface.DEFAULT_BOLD
+                setPadding(0, if (index == 0) 0 else 12, 0, 6)
+            }
+
+            val stepDesc = TextView(this).apply {
+                text = step.second
+                textSize = 13f
+                setTextColor(Color.parseColor("#CFD8DC"))
+                setPadding(0, 0, 0, 12)
+            }
+
+            stepsBox.addView(stepTitle)
+            stepsBox.addView(stepDesc)
+
+            if (index < steps.size - 1) {
+                stepsBox.addView(createHorizontalDivider())
+            }
+        }
+
+        scrollView.addView(stepsBox)
+        rootLayout.addView(scrollView)
+
+        val dlRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            weightSum = 2f
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            params.setMargins(0, 14, 0, 10)
+            layoutParams = params
+        }
+
+        val playBtn = TextView(this).apply {
+            text = "📥 Google Play"
+            textSize = 13f
+            setTextColor(Color.parseColor("#00B0FF"))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 20f, "#1E222B")
+            val params = LinearLayout.LayoutParams(0, 95, 1f)
+            params.setMargins(0, 0, 8, 0)
+            layoutParams = params
+            setOnClickListener {
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=moe.shizuku.privileged.api")))
+                } catch (_: Exception) {}
+            }
+        }
+
+        val githubBtn = TextView(this).apply {
+            text = "🌐 GitHub (APK)"
+            textSize = 13f
+            setTextColor(Color.parseColor("#00B0FF"))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 20f, "#1E222B")
+            val params = LinearLayout.LayoutParams(0, 95, 1f)
+            params.setMargins(8, 0, 0, 0)
+            layoutParams = params
+            setOnClickListener {
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/RikkaApps/Shizuku/releases")))
+                } catch (_: Exception) {}
+            }
+        }
+
+        dlRow.addView(playBtn)
+        dlRow.addView(githubBtn)
+        rootLayout.addView(dlRow)
+
+        val backBtn = TextView(this).apply {
+            text = "Назад к выдаче прав"
+            textSize = 15f
+            setTextColor(Color.parseColor("#00E676"))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            layoutParams = params
+            setOnClickListener {
+                guideDialog?.dismiss()
+                showAdbDialog()
+            }
+        }
+        rootLayout.addView(backBtn)
+
+        guideDialog = AlertDialog.Builder(this)
+            .setView(rootLayout)
+            .create()
+
+        guideDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        guideDialog?.show()
     }
 
     private fun loadServers() {
