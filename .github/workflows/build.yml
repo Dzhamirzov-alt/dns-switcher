@@ -19,25 +19,6 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Cache Android Keystore
-        uses: actions/cache@v4
-        with:
-          path: ~/.android
-          key: android-debug-keystore-v2
-
-      - name: Generate debug keystore if not exists
-        run: |
-          mkdir -p ~/.android
-          if [ ! -f ~/.android/debug.keystore ]; then
-            echo "Создаем постоянный debug.keystore..."
-            keytool -genkey -v -keystore ~/.android/debug.keystore \
-              -storepass android -alias androiddebugkey -keypass android \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          else
-            echo "Используем кешированный ключ подписи."
-          fi
-
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
 
