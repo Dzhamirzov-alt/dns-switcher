@@ -42,7 +42,7 @@ import java.net.Socket
 data class DnsServer(
     var name: String,
     var host: String,
-    var ping: Int = -1 // -1: не проверен, -2: проверка..., -3: недоступен
+    var ping: Int = -1
 )
 
 class MainActivity : Activity() {
@@ -52,7 +52,6 @@ class MainActivity : Activity() {
     private lateinit var listContainer: LinearLayout
     private lateinit var statusBanner: TextView
     private lateinit var netStatusText: TextView
-    private lateinit var tileModeBtn: Button
     private lateinit var modeGroup: RadioGroup
     private lateinit var rbOff: RadioButton
     private lateinit var rbAuto: RadioButton
@@ -180,7 +179,7 @@ class MainActivity : Activity() {
 
     private fun setupUI() {
         val rootScroll = ScrollView(this).apply {
-            setBackgroundColor(Color.parseColor("#08080A")) // Глубокий кибер-чёрный фон
+            setBackgroundColor(Color.parseColor("#08080A"))
             isFillViewport = true
         }
 
@@ -189,17 +188,37 @@ class MainActivity : Activity() {
             setPadding(36, 40, 36, 40)
         }
 
-        // Неоновый заголовок
+        // Верхняя панель: Название слева, Шестеренка справа
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            params.setMargins(0, 0, 0, 16)
+            layoutParams = params
+        }
+
         val title = TextView(this).apply {
             text = "⚡ DNS SWITCHER PRO"
             textSize = 20f
-            setTextColor(Color.parseColor("#00E676")) // Неоново-зеленый акцент
+            setTextColor(Color.parseColor("#00E676"))
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, 0, 0, 12)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        mainLayout.addView(title)
 
-        // Дашборд сети (Статусбар)
+        val settingsBtn = TextView(this).apply {
+            text = "⚙️"
+            textSize = 22f
+            gravity = Gravity.CENTER
+            setPadding(20, 10, 20, 10)
+            background = createRoundRect("#121418", 20f, "#1E222B")
+            setOnClickListener { showSettingsDialog() }
+        }
+
+        topBar.addView(title)
+        topBar.addView(settingsBtn)
+        mainLayout.addView(topBar)
+
+        // Дашборд сети
         netStatusText = TextView(this).apply {
             text = "Инициализация сети..."
             textSize = 13f
@@ -225,22 +244,22 @@ class MainActivity : Activity() {
         }
         mainLayout.addView(statusBanner)
 
-        // Панель режимов «Неоновая капсула»
+        // Акцентная панель режимов
         val modeCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(28, 24, 28, 24)
-            background = createRoundRect("#121418", 28f, "#1E222B")
+            setPadding(32, 28, 32, 28)
+            background = createRoundRect("#161922", 30f, "#00E676") // Акцентная рамка
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            params.setMargins(0, 0, 0, 16)
+            params.setMargins(0, 0, 0, 24)
             layoutParams = params
         }
 
         val modeTitle = TextView(this).apply {
-            text = "СИСТЕМНЫЙ РЕЖИМ"
-            textSize = 11f
-            setTextColor(Color.parseColor("#78909C"))
+            text = "✨ СИСТЕМНЫЙ РЕЖИМ"
+            textSize = 12f
+            setTextColor(Color.parseColor("#00E676"))
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, 0, 0, 10)
+            setPadding(0, 0, 0, 14)
         }
         modeCard.addView(modeTitle)
 
@@ -251,16 +270,19 @@ class MainActivity : Activity() {
 
         rbOff = RadioButton(this).apply {
             text = "Выкл"
+            textSize = 15f
             setTextColor(Color.WHITE)
             layoutParams = RadioGroup.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         rbAuto = RadioButton(this).apply {
             text = "Авто"
+            textSize = 15f
             setTextColor(Color.WHITE)
             layoutParams = RadioGroup.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         rbOn = RadioButton(this).apply {
             text = "Вкл"
+            textSize = 15f
             setTextColor(Color.WHITE)
             layoutParams = RadioGroup.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -288,24 +310,6 @@ class MainActivity : Activity() {
         }
         modeCard.addView(modeGroup)
         mainLayout.addView(modeCard)
-
-        // Кнопка шторки
-        tileModeBtn = Button(this).apply {
-            textSize = 12f
-            setTextColor(Color.parseColor("#CFD8DC"))
-            isAllCaps = false
-            background = createRoundRect("#121418", 22f, "#1E222B")
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
-            params.setMargins(0, 0, 0, 20)
-            layoutParams = params
-            setOnClickListener {
-                val isToggle = prefs.getBoolean("tile_simple_toggle", true)
-                prefs.edit().putBoolean("tile_simple_toggle", !isToggle).apply()
-                updateTileModeButtonText()
-            }
-        }
-        updateTileModeButtonText()
-        mainLayout.addView(tileModeBtn)
 
         // Шапка списка серверов + Пинг
         val headerRow = LinearLayout(this).apply {
@@ -344,71 +348,38 @@ class MainActivity : Activity() {
         }
         mainLayout.addView(listContainer)
 
-        // Кнопка добавления
-        val addServerBtn = Button(this).apply {
-            text = "+ Добавить свой сервер"
-            textSize = 15f
-            setTextColor(Color.parseColor("#00E676"))
-            typeface = Typeface.DEFAULT_BOLD
-            isAllCaps = false
-            gravity = Gravity.START or Gravity.CENTER_VERTICAL
-            setPadding(36, 0, 36, 0)
-            background = createRoundRect("#121418", 24f, "#1E222B")
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120)
-            params.setMargins(0, 10, 0, 16)
-            layoutParams = params
-            setOnClickListener { showEditServerDialog(null) }
-        }
-        mainLayout.addView(addServerBtn)
-
-        // Нижний блок кнопок
-        val bottomActionsRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            weightSum = 2f
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            params.setMargins(0, 0, 0, 20)
-            layoutParams = params
-        }
-
-        val popularBtn = Button(this).apply {
-            text = "📚 Популярные"
-            textSize = 13f
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = createRoundRect("#0D47A1", 22f)
-            val params = LinearLayout.LayoutParams(0, 110, 1f)
-            params.setMargins(0, 0, 8, 0)
-            layoutParams = params
-            setOnClickListener { showPresetsDialog() }
-        }
-
-        val backupBtn = Button(this).apply {
-            text = "💾 Бэкап / Сброс"
-            textSize = 13f
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = createRoundRect("#212121", 22f)
-            val params = LinearLayout.LayoutParams(0, 110, 1f)
-            params.setMargins(8, 0, 0, 0)
-            layoutParams = params
-            setOnClickListener { showBackupDialog() }
-        }
-
-        bottomActionsRow.addView(popularBtn)
-        bottomActionsRow.addView(backupBtn)
-        mainLayout.addView(bottomActionsRow)
-
         rootScroll.addView(mainLayout)
         setContentView(rootScroll)
     }
 
-    private fun updateTileModeButtonText() {
-        val isSimpleToggle = prefs.getBoolean("tile_simple_toggle", true)
-        tileModeBtn.text = if (isSimpleToggle) {
-            "🎛️ Шторка: Обычный тумблер (ВКЛ ↔ ВЫКЛ)"
-        } else {
-            "🎛️ Шторка: Циклический перебор серверов"
-        }
+    // Меню настроек под шестеренкой
+    private fun showSettingsDialog() {
+        val options = arrayOf(
+            "➕ Добавить свой сервер",
+            "📚 Популярные DNS-серверы",
+            "💾 Бэкап / Сброс настроек",
+            if (prefs.getBoolean("tile_simple_toggle", true))
+                "🎛️ Шторка: Обычный тумблер (ВКЛ ↔ ВЫКЛ)"
+            else
+                "🎛️ Шторка: Циклический перебор серверов"
+        )
+
+        AlertDialog.Builder(this)
+            .setTitle("⚙️ Настройки")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> showEditServerDialog(null)
+                    1 -> showPresetsDialog()
+                    2 -> showBackupDialog()
+                    3 -> {
+                        val isToggle = prefs.getBoolean("tile_simple_toggle", true)
+                        prefs.edit().putBoolean("tile_simple_toggle", !isToggle).apply()
+                        Toast.makeText(this, "Режим шторки изменен", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            .setNegativeButton("Закрыть", null)
+            .show()
     }
 
     private fun createRoundRect(colorHex: String, radius: Float, strokeColor: String? = null): GradientDrawable {
@@ -492,7 +463,7 @@ class MainActivity : Activity() {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(32, 26, 20, 26)
                 background = if (isSelected) {
-                    createRoundRect("#0D2318", 26f, "#00E676") // Неоново-зеленая рамка для активного
+                    createRoundRect("#0D2318", 26f, "#00E676")
                 } else {
                     createRoundRect("#121418", 26f, "#1E222B")
                 }
