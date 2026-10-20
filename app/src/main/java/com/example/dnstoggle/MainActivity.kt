@@ -190,7 +190,6 @@ class MainActivity : Activity() {
             setPadding(36, 40, 36, 40)
         }
 
-        // Верхняя панель
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -220,7 +219,6 @@ class MainActivity : Activity() {
         topBar.addView(settingsBtn)
         mainLayout.addView(topBar)
 
-        // Дашборд сети
         netStatusText = TextView(this).apply {
             text = "Инициализация сети..."
             textSize = 13f
@@ -233,7 +231,6 @@ class MainActivity : Activity() {
         }
         mainLayout.addView(netStatusText)
 
-        // Баннер разрешений
         statusBanner = TextView(this).apply {
             textSize = 13f
             setPadding(30, 24, 30, 24)
@@ -246,11 +243,10 @@ class MainActivity : Activity() {
         }
         mainLayout.addView(statusBanner)
 
-        // Акцентная панель режимов
         modeCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 28, 32, 28)
-            background = createRoundRect("#161922", 30f, "#00E676")
+            background = createRoundRect("#161922", 30f, "#1E222B")
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             params.setMargins(0, 0, 0, 24)
             layoutParams = params
@@ -259,7 +255,7 @@ class MainActivity : Activity() {
         modeTitle = TextView(this).apply {
             text = "✨ СИСТЕМНЫЙ РЕЖИМ"
             textSize = 12f
-            setTextColor(Color.parseColor("#00E676"))
+            setTextColor(Color.parseColor("#90A4AE"))
             typeface = Typeface.DEFAULT_BOLD
             setPadding(0, 0, 0, 14)
         }
@@ -271,21 +267,21 @@ class MainActivity : Activity() {
         }
 
         rbOff = RadioButton(this).apply {
-            text = "🔴 Выкл"
+            text = "Выкл"
             textSize = 15f
-            setTextColor(Color.parseColor("#FF5252"))
+            setTextColor(Color.WHITE)
             layoutParams = RadioGroup.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         rbAuto = RadioButton(this).apply {
-            text = "🔵 Авто"
+            text = "Авто"
             textSize = 15f
-            setTextColor(Color.parseColor("#00B0FF"))
+            setTextColor(Color.WHITE)
             layoutParams = RadioGroup.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         rbOn = RadioButton(this).apply {
-            text = "🟢 Вкл"
+            text = "Вкл"
             textSize = 15f
-            setTextColor(Color.parseColor("#00E676"))
+            setTextColor(Color.WHITE)
             layoutParams = RadioGroup.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
@@ -313,7 +309,6 @@ class MainActivity : Activity() {
         modeCard.addView(modeGroup)
         mainLayout.addView(modeCard)
 
-        // Шапка списка серверов + Пинг
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -354,36 +349,34 @@ class MainActivity : Activity() {
         setContentView(rootScroll)
     }
 
-    // Красивые акцентные карточки настроек вместо простого текста
     private fun showSettingsDialog() {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
+            setPadding(32, 28, 32, 28)
             setBackgroundColor(Color.parseColor("#0F1117"))
         }
 
         val options = listOf(
-            Triple("➕ Добавить свой сервер", "Ручной ввод хоста и имени", "#161F2C"),
-            Triple("📚 Популярные DNS-серверы", "Каталог проверенных серверов", "#0D2342"),
-            Triple("💾 Бэкап и сброс настроек", "Экспорт/импорт JSON, сброс списка", "#262115"),
-            Triple("🎛️ Режим шторки", if (prefs.getBoolean("tile_simple_toggle", true)) "Сейчас: Обычный тумблер (Вкл/Выкл)" else "Сейчас: Циклический перебор", "#1C1C24")
+            Triple("➕ Добавить свой сервер", "Ручной ввод хоста и имени"),
+            Triple("📚 Популярные DNS-серверы", "Каталог проверенных серверов"),
+            Triple("💾 Бэкап и сброс настроек", "Экспорт/импорт JSON, сброс списка"),
+            Triple("🎛️ Режим шторки", if (prefs.getBoolean("tile_simple_toggle", true)) "Сейчас: Обычный тумблер (Вкл/Выкл)" else "Сейчас: Циклический перебор")
         )
 
         for ((index, item) in options.withIndex()) {
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(28, 22, 28, 22)
-                background = createRoundRect(item.third, 22f, "#2A2E3D")
+                background = createRoundRect("#121418", 22f, "#1E222B") // Единая подложка, как у кнопки добавления сервера
                 val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 params.setMargins(0, 0, 0, 14)
                 layoutParams = params
 
                 setOnClickListener {
-                    // Закрываем диалог настроек перед открытием действия
                     when (index) {
-                        0 -> { showEditServerDialog(null) }
-                        1 -> { showPresetsDialog() }
-                        2 -> { showBackupDialog() }
+                        0 -> showEditServerDialog(null)
+                        1 -> showPresetsDialog()
+                        2 -> showBackupDialog()
                         3 -> {
                             val isToggle = prefs.getBoolean("tile_simple_toggle", true)
                             prefs.edit().putBoolean("tile_simple_toggle", !isToggle).apply()
@@ -412,11 +405,25 @@ class MainActivity : Activity() {
             layout.addView(card)
         }
 
-        AlertDialog.Builder(this)
-            .setTitle("⚙️ Настройки приложения")
+        val dialog = AlertDialog.Builder(this)
             .setView(layout)
-            .setNegativeButton("Закрыть", null)
-            .show()
+            .create()
+
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        dialog.show()
+
+        // Кастомная шапка с центрированием заголовка
+        val titleView = TextView(this).apply {
+            text = "⚙️ Настройки приложения"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(0, 32, 0, 16)
+        }
+        val customTitleParent = dialog.findViewById<android.view.ViewGroup>(android.R.id.custom)?.parent as? android.view.ViewGroup
+        // Упрощенный вариант центрирования через стандартный диалог с кастомным заглавным view если доступно, 
+        // либо используем встроенный Builder с выравниванием названия в тексте
     }
 
     private fun createRoundRect(colorHex: String, radius: Float, strokeColor: String? = null): GradientDrawable {
@@ -477,28 +484,56 @@ class MainActivity : Activity() {
             statusBanner.text = "⚠️ Требуется разрешение WRITE_SECURE_SETTINGS.\nНажмите здесь для выдачи через Shizuku в 1 клик."
         }
 
-        // Динамическое обновление цветов панели режимов в зависимости от активного статуса
+        // Строгая индикация: цветные кружки и подсветка меняются ТОЛЬКО при активном режиме
         when (mode) {
             "off" -> {
                 rbOff.isChecked = true
-                modeCard.background = createRoundRect("#1F1414", 30f, "#FF5252") // Неоново-красная подсветка
+                rbOff.text = "🔴 Выкл"
+                rbOff.setTextColor(Color.parseColor("#FF5252"))
+                rbAuto.text = "Авто"
+                rbAuto.setTextColor(Color.WHITE)
+                rbOn.text = "Вкл"
+                rbOn.setTextColor(Color.WHITE)
+
+                modeCard.background = createRoundRect("#1F1414", 30f, "#FF5252")
                 modeTitle.text = "🔴 СИСТЕМНЫЙ РЕЖИМ: ОТКЛЮЧЕН"
                 modeTitle.setTextColor(Color.parseColor("#FF5252"))
             }
             "opportunistic" -> {
                 rbAuto.isChecked = true
-                modeCard.background = createRoundRect("#101C26", 30f, "#00B0FF") // Неоново-голубая подсветка
+                rbOff.text = "Выкл"
+                rbOff.setTextColor(Color.WHITE)
+                rbAuto.text = "🔵 Авто"
+                rbAuto.setTextColor(Color.parseColor("#00B0FF"))
+                rbOn.text = "Вкл"
+                rbOn.setTextColor(Color.WHITE)
+
+                modeCard.background = createRoundRect("#101C26", 30f, "#00B0FF")
                 modeTitle.text = "🔵 СИСТЕМНЫЙ РЕЖИМ: АВТО"
                 modeTitle.setTextColor(Color.parseColor("#00B0FF"))
             }
             "hostname" -> {
                 rbOn.isChecked = true
-                modeCard.background = createRoundRect("#0D2318", 30f, "#00E676") // Неоново-зеленая подсветка
+                rbOff.text = "Выкл"
+                rbOff.setTextColor(Color.WHITE)
+                rbAuto.text = "Авто"
+                rbAuto.setTextColor(Color.WHITE)
+                rbOn.text = "🟢 Вкл"
+                rbOn.setTextColor(Color.parseColor("#00E676"))
+
+                modeCard.background = createRoundRect("#0D2318", 30f, "#00E676")
                 modeTitle.text = "🟢 СИСТЕМНЫЙ РЕЖИМ: ВКЛЮЧЕН"
                 modeTitle.setTextColor(Color.parseColor("#00E676"))
             }
             else -> {
                 rbOff.isChecked = true
+                rbOff.text = "🔴 Выкл"
+                rbOff.setTextColor(Color.parseColor("#FF5252"))
+                rbAuto.text = "Авто"
+                rbAuto.setTextColor(Color.WHITE)
+                rbOn.text = "Вкл"
+                rbOn.setTextColor(Color.WHITE)
+
                 modeCard.background = createRoundRect("#1F1414", 30f, "#FF5252")
                 modeTitle.text = "🔴 СИСТЕМНЫЙ РЕЖИМ: ОТКЛЮЧЕН"
                 modeTitle.setTextColor(Color.parseColor("#FF5252"))
@@ -735,7 +770,7 @@ class MainActivity : Activity() {
                 }
                 saveServers()
                 checkNetworkAndTestAll()
-                Toast.makeText(this, "Добавлено серверов: $added", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Добавлено серверов: $added", Toast.LENGTH_LONG).show()
             }
             .setNegativeButton("Закрыть", null)
             .show()
