@@ -503,7 +503,7 @@ class MainActivity : Activity() {
         dialogInstance?.show()
     }
 
-    // Экран Ping Benchmark (Рейтинг серверов по скорости)
+    // Экран Ping Benchmark (тест происходит прямо внутри окна без его закрытия)
     private fun showBenchmarkDialog() {
         var benchDialog: AlertDialog? = null
 
@@ -543,95 +543,98 @@ class MainActivity : Activity() {
             setPadding(16, 8, 16, 8)
         }
 
-        // Сортируем копию списка по пингу
-        val sortedList = serverList.sortedWith(Comparator { a, b ->
-            val pA = if (a.ping > 0) a.ping else Int.MAX_VALUE
-            val pB = if (b.ping > 0) b.ping else Int.MAX_VALUE
-            pA.compareTo(pB)
-        })
+        fun populateBenchmarkList() {
+            listBox.removeAllViews()
+            val sortedList = serverList.sortedWith(Comparator { a, b ->
+                val pA = if (a.ping > 0) a.ping else Int.MAX_VALUE
+                val pB = if (b.ping > 0) b.ping else Int.MAX_VALUE
+                pA.compareTo(pB)
+            })
 
-        if (sortedList.isEmpty()) {
-            val emptyTv = TextView(this).apply {
-                text = "Список серверов пуст"
-                textSize = 14f
-                setTextColor(Color.parseColor("#90A4AE"))
-                gravity = Gravity.CENTER
-                setPadding(20, 30, 20, 30)
-            }
-            listBox.addView(emptyTv)
-        } else {
-            for ((index, server) in sortedList.withIndex()) {
-                val rank = when (index) {
-                    0 -> "🥇 #1"
-                    1 -> "🥈 #2"
-                    2 -> "🥉 #3"
-                    else -> "    #${index + 1}"
+            if (sortedList.isEmpty()) {
+                val emptyTv = TextView(this).apply {
+                    text = "Список серверов пуст"
+                    textSize = 14f
+                    setTextColor(Color.parseColor("#90A4AE"))
+                    gravity = Gravity.CENTER
+                    setPadding(20, 30, 20, 30)
                 }
-
-                val itemLayout = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(16, 22, 16, 22)
-                    setOnClickListener {
-                        benchDialog?.dismiss()
-                        applyDnsMode("hostname", server.host)
-                        Toast.makeText(this@MainActivity, "Подключен лучший: ${server.name}", Toast.LENGTH_SHORT).show()
+                listBox.addView(emptyTv)
+            } else {
+                for ((index, server) in sortedList.withIndex()) {
+                    val rank = when (index) {
+                        0 -> "🥇 #1"
+                        1 -> "🥈 #2"
+                        2 -> "🥉 #3"
+                        else -> "    #${index + 1}"
                     }
-                }
 
-                val rankTv = TextView(this).apply {
-                    text = rank
-                    textSize = 14f
-                    setTextColor(Color.parseColor(accentColorHex))
-                    typeface = Typeface.DEFAULT_BOLD
-                    val params = LinearLayout.LayoutParams(80, ViewGroup.LayoutParams.WRAP_CONTENT)
-                    layoutParams = params
-                }
+                    val itemLayout = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(16, 22, 16, 22)
+                        setOnClickListener {
+                            benchDialog?.dismiss()
+                            applyDnsMode("hostname", server.host)
+                            Toast.makeText(this@MainActivity, "Подключен лучший: ${server.name}", Toast.LENGTH_SHORT).show()
+                        }
+                    }
 
-                val detailsLayout = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                }
+                    val rankTv = TextView(this).apply {
+                        text = rank
+                        textSize = 14f
+                        setTextColor(Color.parseColor(accentColorHex))
+                        typeface = Typeface.DEFAULT_BOLD
+                        val params = LinearLayout.LayoutParams(80, ViewGroup.LayoutParams.WRAP_CONTENT)
+                        layoutParams = params
+                    }
 
-                val nameTv = TextView(this).apply {
-                    text = server.name
-                    textSize = 14f
-                    setTextColor(Color.WHITE)
-                    typeface = Typeface.DEFAULT_BOLD
-                }
+                    val detailsLayout = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    }
 
-                val pingStr = when (server.ping) {
-                    -1 -> "Не проверен"
-                    -2 -> "Тестирование..."
-                    -3 -> "❌ Заблокирован (порт 853)"
-                    else -> "⚡ ${server.ping} мс"
-                }
+                    val nameTv = TextView(this).apply {
+                        text = server.name
+                        textSize = 14f
+                        setTextColor(Color.WHITE)
+                        typeface = Typeface.DEFAULT_BOLD
+                    }
 
-                val pingTv = TextView(this).apply {
-                    text = "$pingStr (${server.host})"
-                    textSize = 12f
-                    setTextColor(if (server.ping > 0) Color.parseColor("#90A4AE") else Color.parseColor("#FF5252"))
-                    setPadding(0, 4, 0, 0)
-                }
+                    val pingStr = when (server.ping) {
+                        -1 -> "Не проверен"
+                        -2 -> "⏳ Тестирование..."
+                        -3 -> "❌ Заблокирован (порт 853)"
+                        else -> "⚡ ${server.ping} мс"
+                    }
 
-                detailsLayout.addView(nameTv)
-                detailsLayout.addView(pingTv)
+                    val pingTv = TextView(this).apply {
+                        text = "$pingStr (${server.host})"
+                        textSize = 12f
+                        setTextColor(if (server.ping > 0) Color.parseColor("#90A4AE") else Color.parseColor("#FF5252"))
+                        setPadding(0, 4, 0, 0)
+                    }
 
-                itemLayout.addView(rankTv)
-                itemLayout.addView(detailsLayout)
-                listBox.addView(itemLayout)
+                    detailsLayout.addView(nameTv)
+                    detailsLayout.addView(pingTv)
 
-                if (index < sortedList.size - 1) {
-                    listBox.addView(createHorizontalDivider())
+                    itemLayout.addView(rankTv)
+                    itemLayout.addView(detailsLayout)
+                    listBox.addView(itemLayout)
+
+                    if (index < sortedList.size - 1) {
+                        listBox.addView(createHorizontalDivider())
+                    }
                 }
             }
         }
 
+        populateBenchmarkList()
         scrollView.addView(listBox)
         rootLayout.addView(scrollView)
 
         val runTestBtn = TextView(this).apply {
-            text = "🔄 Заполнить / Перетестировать"
+            text = "🔄 Запустить тест скорости"
             textSize = 14f
             setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
@@ -641,9 +644,46 @@ class MainActivity : Activity() {
             params.setMargins(0, 16, 0, 10)
             layoutParams = params
             setOnClickListener {
-                benchDialog?.dismiss()
-                checkNetworkAndTestAll()
-                Toast.makeText(this@MainActivity, "Запущен полный тест скорости!", Toast.LENGTH_SHORT).show()
+                text = "⏳ Идет сканирование..."
+                for (s in serverList) s.ping = -2
+                populateBenchmarkList()
+
+                Thread {
+                    val snapshot = serverList.toList()
+                    for (server in snapshot) {
+                        val startTime = System.currentTimeMillis()
+                        var resultPing = -3
+                        val socket = Socket()
+                        try {
+                            socket.connect(InetSocketAddress(server.host, 853), 2500)
+                            resultPing = (System.currentTimeMillis() - startTime).toInt()
+                        } catch (_: Exception) {
+                            resultPing = -3
+                        } finally {
+                            try {
+                                socket.close()
+                            } catch (_: Exception) {}
+                        }
+                        server.ping = resultPing
+
+                        runOnUiThread {
+                            populateBenchmarkList()
+                        }
+                    }
+
+                    runOnUiThread {
+                        serverList.sortWith(Comparator { a, b ->
+                            val pA = if (a.ping > 0) a.ping else Int.MAX_VALUE
+                            val pB = if (b.ping > 0) b.ping else Int.MAX_VALUE
+                            pA.compareTo(pB)
+                        })
+                        saveServers()
+                        text = "🔄 Запустить тест скорости"
+                        populateBenchmarkList()
+                        renderServerList()
+                        Toast.makeText(this@MainActivity, "✅ Тест скорости завершен!", Toast.LENGTH_SHORT).show()
+                    }
+                }.start()
             }
         }
         rootLayout.addView(runTestBtn)
