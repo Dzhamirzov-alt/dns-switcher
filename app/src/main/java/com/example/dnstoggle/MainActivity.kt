@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -246,14 +247,14 @@ class MainActivity : Activity() {
         modeCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 28, 32, 28)
-            background = createRoundRect("#161922", 30f, "#1E222B")
+            background = createRoundRect("#121418", 30f, "#1E222B")
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             params.setMargins(0, 0, 0, 24)
             layoutParams = params
         }
 
         modeTitle = TextView(this).apply {
-            text = "✨ СИСТЕМНЫЙ РЕЖИМ"
+            text = "СИСТЕМНЫЙ РЕЖИМ"
             textSize = 12f
             setTextColor(Color.parseColor("#90A4AE"))
             typeface = Typeface.DEFAULT_BOLD
@@ -269,19 +270,19 @@ class MainActivity : Activity() {
         rbOff = RadioButton(this).apply {
             text = "Выкл"
             textSize = 15f
-            setTextColor(Color.WHITE)
+            setPadding(12, 0, 0, 0)
             layoutParams = RadioGroup.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         rbAuto = RadioButton(this).apply {
             text = "Авто"
             textSize = 15f
-            setTextColor(Color.WHITE)
+            setPadding(12, 0, 0, 0)
             layoutParams = RadioGroup.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         rbOn = RadioButton(this).apply {
             text = "Вкл"
             textSize = 15f
-            setTextColor(Color.WHITE)
+            setPadding(12, 0, 0, 0)
             layoutParams = RadioGroup.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
@@ -350,25 +351,47 @@ class MainActivity : Activity() {
     }
 
     private fun showSettingsDialog() {
+        var dialogInstance: AlertDialog? = null
+
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(36, 32, 36, 32)
-            setBackgroundColor(Color.parseColor("#0F1117"))
+            setPadding(36, 28, 36, 28)
+            background = createRoundRect("#0F1117", 36f, "#1E222B")
         }
 
-        val options = listOf(
-            Triple("➕ Добавить свой сервер", "Ручной ввод хоста и имени"),
-            Triple("📚 Популярные DNS-серверы", "Каталог проверенных серверов"),
-            Triple("💾 Бэкап и сброс настроек", "Экспорт/импорт JSON, сброс списка"),
-            Triple("🎛️ Режим шторки", if (prefs.getBoolean("tile_simple_toggle", true)) "Сейчас: Обычный тумблер (Вкл/Выкл)" else "Сейчас: Циклический перебор")
-        )
+        // Заголовок строго по центру вертикально и горизонтально
+        val headerBox = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 115)
+            params.setMargins(0, 0, 0, 24)
+            layoutParams = params
+        }
 
-        var dialogInstance: AlertDialog? = null
+        val titleView = TextView(this).apply {
+            text = "⚙️ Настройки приложения"
+            textSize = 17f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+        headerBox.addView(titleView)
+        rootLayout.addView(headerBox)
+
+        val options = listOf(
+            Pair("➕ Добавить свой сервер", "Ручной ввод хоста и имени"),
+            Pair("📚 Популярные DNS-серверы", "Каталог проверенных серверов"),
+            Pair("💾 Бэкап и сброс настроек", "Экспорт/импорт JSON, сброс списка"),
+            Pair("🎛️ Режим шторки", if (prefs.getBoolean("tile_simple_toggle", true)) "Сейчас: Обычный тумблер (Вкл/Выкл)" else "Сейчас: Циклический перебор")
+        )
 
         for ((index, item) in options.withIndex()) {
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_VERTICAL
                 setPadding(28, 22, 28, 22)
+                // Единый цвет подложки для всех пунктов, как у кнопки "Добавить свой сервер"
                 background = createRoundRect("#121418", 22f, "#1E222B")
                 val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 params.setMargins(0, 0, 0, 14)
@@ -408,31 +431,27 @@ class MainActivity : Activity() {
             rootLayout.addView(card)
         }
 
-        val titleView = TextView(this).apply {
-            text = "⚙️ Настройки приложения"
-            textSize = 18f
-            setTextColor(Color.WHITE)
+        // Кнопка "Закрыть" строго по центру вертикально и горизонтально
+        val closeBtn = TextView(this).apply {
+            text = "Закрыть"
+            textSize = 15f
+            setTextColor(Color.parseColor("#00E676"))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            setPadding(0, 20, 0, 20)
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
+            params.setMargins(0, 10, 0, 0)
+            layoutParams = params
+            setOnClickListener { dialogInstance?.dismiss() }
         }
+        rootLayout.addView(closeBtn)
 
         dialogInstance = AlertDialog.Builder(this)
-            .setCustomTitle(titleView)
             .setView(rootLayout)
-            .setNegativeButton("Закрыть", null)
             .create()
 
+        dialogInstance?.window?.setBackgroundDrawableResource(android.R.color.transparent)
         dialogInstance?.show()
-
-        dialogInstance?.getButton(AlertDialog.BUTTON_NEGATIVE)?.let { btn ->
-            val parent = btn.parent as? LinearLayout
-            parent?.gravity = Gravity.CENTER
-            btn.isAllCaps = false
-            btn.setTextColor(Color.parseColor("#00E676"))
-            btn.typeface = Typeface.DEFAULT_BOLD
-            (btn.layoutParams as? LinearLayout.LayoutParams)?.weight = 1f
-        }
     }
 
     private fun createRoundRect(colorHex: String, radius: Float, strokeColor: String? = null): GradientDrawable {
@@ -493,58 +512,65 @@ class MainActivity : Activity() {
             statusBanner.text = "⚠️ Требуется разрешение WRITE_SECURE_SETTINGS.\nНажмите здесь для выдачи через Shizuku в 1 клик."
         }
 
+        val inactiveColor = Color.parseColor("#78909C")
+        val redColor = Color.parseColor("#FF5252")
+        val blueColor = Color.parseColor("#00B0FF")
+        val greenColor = Color.parseColor("#00E676")
+
+        // Сначала сбрасываем все радиокнопки в спокойный серый цвет
+        rbOff.setTextColor(inactiveColor)
+        rbOff.typeface = Typeface.DEFAULT
+        rbOff.buttonTintList = ColorStateList.valueOf(inactiveColor)
+
+        rbAuto.setTextColor(inactiveColor)
+        rbAuto.typeface = Typeface.DEFAULT
+        rbAuto.buttonTintList = ColorStateList.valueOf(inactiveColor)
+
+        rbOn.setTextColor(inactiveColor)
+        rbOn.typeface = Typeface.DEFAULT
+        rbOn.buttonTintList = ColorStateList.valueOf(inactiveColor)
+
+        // Зажигаем своим цветом ТОЛЬКО активный кружок, его текст и рамку основной кнопки
         when (mode) {
             "off" -> {
                 rbOff.isChecked = true
-                rbOff.text = "🔴 Выкл"
-                rbOff.setTextColor(Color.parseColor("#FF5252"))
-                rbAuto.text = "Авто"
-                rbAuto.setTextColor(Color.WHITE)
-                rbOn.text = "Вкл"
-                rbOn.setTextColor(Color.WHITE)
+                rbOff.setTextColor(redColor)
+                rbOff.typeface = Typeface.DEFAULT_BOLD
+                rbOff.buttonTintList = ColorStateList.valueOf(redColor)
 
-                modeCard.background = createRoundRect("#1F1414", 30f, "#FF5252")
-                modeTitle.text = "🔴 СИСТЕМНЫЙ РЕЖИМ: ОТКЛЮЧЕН"
-                modeTitle.setTextColor(Color.parseColor("#FF5252"))
+                modeCard.background = createRoundRect("#1F1214", 30f, "#FF5252")
+                modeTitle.text = "СИСТЕМНЫЙ РЕЖИМ: ОТКЛЮЧЕН"
+                modeTitle.setTextColor(redColor)
             }
             "opportunistic" -> {
                 rbAuto.isChecked = true
-                rbOff.text = "Выкл"
-                rbOff.setTextColor(Color.WHITE)
-                rbAuto.text = "🔵 Авто"
-                rbAuto.setTextColor(Color.parseColor("#00B0FF"))
-                rbOn.text = "Вкл"
-                rbOn.setTextColor(Color.WHITE)
+                rbAuto.setTextColor(blueColor)
+                rbAuto.typeface = Typeface.DEFAULT_BOLD
+                rbAuto.buttonTintList = ColorStateList.valueOf(blueColor)
 
-                modeCard.background = createRoundRect("#101C26", 30f, "#00B0FF")
-                modeTitle.text = "🔵 СИСТЕМНЫЙ РЕЖИМ: АВТО"
-                modeTitle.setTextColor(Color.parseColor("#00B0FF"))
+                modeCard.background = createRoundRect("#101A24", 30f, "#00B0FF")
+                modeTitle.text = "СИСТЕМНЫЙ РЕЖИМ: АВТО"
+                modeTitle.setTextColor(blueColor)
             }
             "hostname" -> {
                 rbOn.isChecked = true
-                rbOff.text = "Выкл"
-                rbOff.setTextColor(Color.WHITE)
-                rbAuto.text = "Авто"
-                rbAuto.setTextColor(Color.WHITE)
-                rbOn.text = "🟢 Вкл"
-                rbOn.setTextColor(Color.parseColor("#00E676"))
+                rbOn.setTextColor(greenColor)
+                rbOn.typeface = Typeface.DEFAULT_BOLD
+                rbOn.buttonTintList = ColorStateList.valueOf(greenColor)
 
                 modeCard.background = createRoundRect("#0D2318", 30f, "#00E676")
-                modeTitle.text = "🟢 СИСТЕМНЫЙ РЕЖИМ: ВКЛЮЧЕН"
-                modeTitle.setTextColor(Color.parseColor("#00E676"))
+                modeTitle.text = "СИСТЕМНЫЙ РЕЖИМ: ВКЛЮЧЕН"
+                modeTitle.setTextColor(greenColor)
             }
             else -> {
                 rbOff.isChecked = true
-                rbOff.text = "🔴 Выкл"
-                rbOff.setTextColor(Color.parseColor("#FF5252"))
-                rbAuto.text = "Авто"
-                rbAuto.setTextColor(Color.WHITE)
-                rbOn.text = "Вкл"
-                rbOn.setTextColor(Color.WHITE)
+                rbOff.setTextColor(redColor)
+                rbOff.typeface = Typeface.DEFAULT_BOLD
+                rbOff.buttonTintList = ColorStateList.valueOf(redColor)
 
-                modeCard.background = createRoundRect("#1F1414", 30f, "#FF5252")
-                modeTitle.text = "🔴 СИСТЕМНЫЙ РЕЖИМ: ОТКЛЮЧЕН"
-                modeTitle.setTextColor(Color.parseColor("#FF5252"))
+                modeCard.background = createRoundRect("#1F1214", 30f, "#FF5252")
+                modeTitle.text = "СИСТЕМНЫЙ РЕЖИМ: ОТКЛЮЧЕН"
+                modeTitle.setTextColor(redColor)
             }
         }
 
@@ -586,7 +612,7 @@ class MainActivity : Activity() {
 
             val indicator = if (isSelected) "🟢" else "⚪"
             val nameTv = TextView(this).apply {
-                text = "$indicator${server.name}"
+                text = "$indicator ${server.name}"
                 textSize = 16f
                 setTextColor(Color.WHITE)
                 typeface = Typeface.DEFAULT_BOLD
@@ -992,4 +1018,119 @@ class DnsTileService : TileService() {
     override fun onClick() {
         super.onClick()
         if (checkSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS) != PackageManager.PERMISSION_GRANTED) {
-            Toast.
+            Toast.makeText(this, "Сначала выдайте разрешение в приложении", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val prefs = getSharedPreferences("dns_prefs", Context.MODE_PRIVATE)
+        val isSimpleToggle = prefs.getBoolean("tile_simple_toggle", true)
+
+        val raw = prefs.getString("servers_json", null)
+        val hosts = mutableListOf<Pair<String, String>>()
+        if (!raw.isNullOrEmpty()) {
+            try {
+                val arr = JSONArray(raw)
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    hosts.add(Pair(o.getString("name"), o.getString("host")))
+                }
+            } catch (_: Exception) {}
+        }
+        if (hosts.isEmpty()) {
+            hosts.add(Pair("Comss.one", "dns.comss.one"))
+        }
+
+        val currentMode = Settings.Global.getString(contentResolver, "private_dns_mode") ?: "off"
+        val currentHost = Settings.Global.getString(contentResolver, "private_dns_specifier") ?: ""
+
+        if (isSimpleToggle) {
+            if (currentMode == "off") {
+                val savedHost = prefs.getString("last_active_host", null)
+                val targetHost = when {
+                    !savedHost.isNullOrEmpty() -> savedHost
+                    currentHost.isNotEmpty() -> currentHost
+                    else -> hosts[0].second
+                }
+                Settings.Global.putString(contentResolver, "private_dns_mode", "hostname")
+                Settings.Global.putString(contentResolver, "private_dns_specifier", targetHost)
+            } else {
+                if (currentMode == "hostname" && currentHost.isNotEmpty()) {
+                    prefs.edit().putString("last_active_host", currentHost).apply()
+                }
+                Settings.Global.putString(contentResolver, "private_dns_mode", "off")
+            }
+        } else {
+            when (currentMode) {
+                "off" -> {
+                    Settings.Global.putString(contentResolver, "private_dns_mode", "opportunistic")
+                }
+                "opportunistic" -> {
+                    Settings.Global.putString(contentResolver, "private_dns_mode", "hostname")
+                    Settings.Global.putString(contentResolver, "private_dns_specifier", hosts[0].second)
+                    prefs.edit().putString("last_active_host", hosts[0].second).apply()
+                }
+                "hostname" -> {
+                    val idx = hosts.indexOfFirst { it.second.equals(currentHost, ignoreCase = true) }
+                    if (idx != -1 && idx + 1 < hosts.size) {
+                        val nextHost = hosts[idx + 1].second
+                        Settings.Global.putString(contentResolver, "private_dns_specifier", nextHost)
+                        prefs.edit().putString("last_active_host", nextHost).apply()
+                    } else {
+                        Settings.Global.putString(contentResolver, "private_dns_mode", "off")
+                    }
+                }
+                else -> {
+                    Settings.Global.putString(contentResolver, "private_dns_mode", "off")
+                }
+            }
+        }
+        updateTile()
+    }
+
+    private fun updateTile() {
+        val tile = qsTile ?: return
+        val mode = Settings.Global.getString(contentResolver, "private_dns_mode") ?: "off"
+        val host = Settings.Global.getString(contentResolver, "private_dns_specifier") ?: ""
+
+        val prefs = getSharedPreferences("dns_prefs", Context.MODE_PRIVATE)
+        val raw = prefs.getString("servers_json", null)
+        var matchedName: String? = null
+        if (!raw.isNullOrEmpty()) {
+            try {
+                val arr = JSONArray(raw)
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    if (o.getString("host").equals(host, ignoreCase = true)) {
+                        matchedName = o.getString("name")
+                        break
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        when (mode) {
+            "off" -> {
+                tile.state = Tile.STATE_INACTIVE
+                tile.label = "DNS: Выкл"
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    tile.subtitle = "Отключен"
+                }
+            }
+            "opportunistic" -> {
+                tile.state = Tile.STATE_ACTIVE
+                tile.label = "DNS: Авто"
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    tile.subtitle = "Автоматический"
+                }
+            }
+            "hostname" -> {
+                tile.state = Tile.STATE_ACTIVE
+                tile.label = matchedName ?: "Private DNS"
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    tile.subtitle = if (host.isEmpty()) "Включен" else host
+                }
+            }
+        }
+        tile.updateTile()
+    }
+}
