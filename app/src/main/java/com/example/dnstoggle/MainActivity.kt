@@ -350,11 +350,22 @@ class MainActivity : Activity() {
     }
 
     private fun showSettingsDialog() {
-        val layout = LinearLayout(this).apply {
+        val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 28, 32, 28)
+            setPadding(36, 32, 36, 32)
             setBackgroundColor(Color.parseColor("#0F1117"))
         }
+
+        // Заголовок по центру
+        val titleView = TextView(this).apply {
+            text = "⚙️ Настройки приложения"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 24)
+        }
+        rootLayout.addView(titleView)
 
         val options = listOf(
             Triple("➕ Добавить свой сервер", "Ручной ввод хоста и имени"),
@@ -362,6 +373,8 @@ class MainActivity : Activity() {
             Triple("💾 Бэкап и сброс настроек", "Экспорт/импорт JSON, сброс списка"),
             Triple("🎛️ Режим шторки", if (prefs.getBoolean("tile_simple_toggle", true)) "Сейчас: Обычный тумблер (Вкл/Выкл)" else "Сейчас: Циклический перебор")
         )
+
+        var dialogInstance: AlertDialog? = null
 
         for ((index, item) in options.withIndex()) {
             val card = LinearLayout(this).apply {
@@ -373,6 +386,7 @@ class MainActivity : Activity() {
                 layoutParams = params
 
                 setOnClickListener {
+                    dialogInstance?.dismiss()
                     when (index) {
                         0 -> showEditServerDialog(null)
                         1 -> showPresetsDialog()
@@ -402,28 +416,25 @@ class MainActivity : Activity() {
 
             card.addView(titleTv)
             card.addView(subTv)
-            layout.addView(card)
+            rootLayout.addView(card)
         }
 
-        val dialog = AlertDialog.Builder(this)
-            .setView(layout)
+        dialogInstance = AlertDialog.Builder(this)
+            .setView(rootLayout)
+            .setNegativeButton("Закрыть", null)
             .create()
 
-        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
-        dialog.show()
+        dialogInstance?.show()
 
-        // Кастомная шапка с центрированием заголовка
-        val titleView = TextView(this).apply {
-            text = "⚙️ Настройки приложения"
-            textSize = 18f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(0, 32, 0, 16)
+        // Выравнивание кнопки "Закрыть" по центру
+        dialogInstance?.getButton(AlertDialog.BUTTON_NEGATIVE)?.let { btn ->
+            val parent = btn.parent as? LinearLayout
+            parent?.gravity = Gravity.CENTER
+            btn.isAllCaps = false
+            btn.setTextColor(Color.parseColor("#00E676"))
+            btn.typeface = Typeface.DEFAULT_BOLD
+            (btn.layoutParams as? LinearLayout.LayoutParams)?.weight = 1f
         }
-        val customTitleParent = dialog.findViewById<android.view.ViewGroup>(android.R.id.custom)?.parent as? android.view.ViewGroup
-        // Упрощенный вариант центрирования через стандартный диалог с кастомным заглавным view если доступно, 
-        // либо используем встроенный Builder с выравниванием названия в тексте
     }
 
     private fun createRoundRect(colorHex: String, radius: Float, strokeColor: String? = null): GradientDrawable {
