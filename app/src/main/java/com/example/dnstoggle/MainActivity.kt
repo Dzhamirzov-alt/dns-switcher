@@ -161,7 +161,6 @@ class MainActivity : Activity() {
         prefs.edit().putString("app_theme", themeKey).apply()
         loadThemePreferences()
         
-        // Обновляем цвета элементов главного экрана под новую тему
         titleApp.setTextColor(Color.parseColor(accentColorHex))
         pingBtn.background = createRoundRect(accentCardBgHex, 20f, accentColorHex)
         pingBtn.setTextColor(Color.parseColor(accentColorHex))
@@ -430,6 +429,7 @@ class MainActivity : Activity() {
         val options = listOf(
             Pair("➕ Добавить свой сервер", "Ручной ввод хоста и имени"),
             Pair("📚 Популярные DNS-серверы", "Каталог проверенных серверов"),
+            Pair("📊 Ping Benchmark (Топ серверов)", "Анализ и рейтинг скорости DoT"),
             Pair("💾 Бэкап и сброс настроек", "Экспорт/импорт JSON, сброс списка"),
             Pair("🎨 Выбор темы оформления", "Сменить неоновый стиль интерфейса"),
             Pair("🎛️ Режим шторки", if (prefs.getBoolean("tile_simple_toggle", true)) "Сейчас: Обычный тумблер (Вкл/Выкл)" else "Сейчас: Циклический перебор")
@@ -450,9 +450,10 @@ class MainActivity : Activity() {
                     when (index) {
                         0 -> showEditServerDialog(null)
                         1 -> showPresetsDialog()
-                        2 -> showBackupDialog()
-                        3 -> showThemeChooserDialog()
-                        4 -> {
+                        2 -> showBenchmarkDialog()
+                        3 -> showBackupDialog()
+                        4 -> showThemeChooserDialog()
+                        5 -> {
                             val isToggle = prefs.getBoolean("tile_simple_toggle", true)
                             prefs.edit().putBoolean("tile_simple_toggle", !isToggle).apply()
                             Toast.makeText(this@MainActivity, "Режим шторки изменен", Toast.LENGTH_SHORT).show()
@@ -500,6 +501,172 @@ class MainActivity : Activity() {
 
         dialogInstance?.window?.setBackgroundDrawableResource(android.R.color.transparent)
         dialogInstance?.show()
+    }
+
+    // Экран Ping Benchmark (Рейтинг серверов по скорости)
+    private fun showBenchmarkDialog() {
+        var benchDialog: AlertDialog? = null
+
+        val rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(36, 28, 36, 28)
+            background = createRoundRect("#0F1117", 36f, "#1E222B")
+        }
+
+        val headerBox = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
+            params.setMargins(0, 0, 0, 16)
+            layoutParams = params
+        }
+
+        val titleView = TextView(this).apply {
+            text = "📊 Ping Benchmark — Топ серверов"
+            textSize = 15f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+        headerBox.addView(titleView)
+        rootLayout.addView(headerBox)
+
+        val scrollView = ScrollView(this).apply {
+            val maxHeight = (resources.displayMetrics.heightPixels * 0.50).toInt()
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxHeight)
+        }
+
+        val listBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            setPadding(16, 8, 16, 8)
+        }
+
+        // Сортируем копию списка по пингу
+        val sortedList = serverList.sortedWith(Comparator { a, b ->
+            val pA = if (a.ping > 0) a.ping else Int.MAX_VALUE
+            val pB = if (b.ping > 0) b.ping else Int.MAX_VALUE
+            pA.compareTo(pB)
+        })
+
+        if (sortedList.isEmpty()) {
+            val emptyTv = TextView(this).apply {
+                text = "Список серверов пуст"
+                textSize = 14f
+                setTextColor(Color.parseColor("#90A4AE"))
+                gravity = Gravity.CENTER
+                setPadding(20, 30, 20, 30)
+            }
+            listBox.addView(emptyTv)
+        } else {
+            for ((index, server) in sortedList.withIndex()) {
+                val rank = when (index) {
+                    0 -> "🥇 #1"
+                    1 -> "🥈 #2"
+                    2 -> "🥉 #3"
+                    else -> "    #${index + 1}"
+                }
+
+                val itemLayout = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(16, 22, 16, 22)
+                    setOnClickListener {
+                        benchDialog?.dismiss()
+                        applyDnsMode("hostname", server.host)
+                        Toast.makeText(this@MainActivity, "Подключен лучший: ${server.name}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+
+                val rankTv = TextView(this).apply {
+                    text = rank
+                    textSize = 14f
+                    setTextColor(Color.parseColor(accentColorHex))
+                    typeface = Typeface.DEFAULT_BOLD
+                    val params = LinearLayout.LayoutParams(80, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    layoutParams = params
+                }
+
+                val detailsLayout = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                }
+
+                val nameTv = TextView(this).apply {
+                    text = server.name
+                    textSize = 14f
+                    setTextColor(Color.WHITE)
+                    typeface = Typeface.DEFAULT_BOLD
+                }
+
+                val pingStr = when (server.ping) {
+                    -1 -> "Не проверен"
+                    -2 -> "Тестирование..."
+                    -3 -> "❌ Заблокирован (порт 853)"
+                    else -> "⚡ ${server.ping} мс"
+                }
+
+                val pingTv = TextView(this).apply {
+                    text = "$pingStr (${server.host})"
+                    textSize = 12f
+                    setTextColor(if (server.ping > 0) Color.parseColor("#90A4AE") else Color.parseColor("#FF5252"))
+                    setPadding(0, 4, 0, 0)
+                }
+
+                detailsLayout.addView(nameTv)
+                detailsLayout.addView(pingTv)
+
+                itemLayout.addView(rankTv)
+                itemLayout.addView(detailsLayout)
+                listBox.addView(itemLayout)
+
+                if (index < sortedList.size - 1) {
+                    listBox.addView(createHorizontalDivider())
+                }
+            }
+        }
+
+        scrollView.addView(listBox)
+        rootLayout.addView(scrollView)
+
+        val runTestBtn = TextView(this).apply {
+            text = "🔄 Заполнить / Перетестировать"
+            textSize = 14f
+            setTextColor(Color.parseColor(accentColorHex))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            params.setMargins(0, 16, 0, 10)
+            layoutParams = params
+            setOnClickListener {
+                benchDialog?.dismiss()
+                checkNetworkAndTestAll()
+                Toast.makeText(this@MainActivity, "Запущен полный тест скорости!", Toast.LENGTH_SHORT).show()
+            }
+        }
+        rootLayout.addView(runTestBtn)
+
+        val closeBtn = TextView(this).apply {
+            text = "Закрыть"
+            textSize = 15f
+            setTextColor(Color.parseColor("#90A4AE"))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            layoutParams = params
+            setOnClickListener { benchDialog?.dismiss() }
+        }
+        rootLayout.addView(closeBtn)
+
+        benchDialog = AlertDialog.Builder(this)
+            .setView(rootLayout)
+            .create()
+
+        benchDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        benchDialog?.show()
     }
 
     private fun showThemeChooserDialog() {
