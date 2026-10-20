@@ -60,6 +60,7 @@ class MainActivity : Activity() {
     private lateinit var rbOn: RadioButton
     private lateinit var modeTitle: TextView
     private lateinit var titleApp: TextView
+    private lateinit var pingBtn: Button
     private var isUpdatingUi = false
 
     // Конфигурация цветовых тем
@@ -159,7 +160,12 @@ class MainActivity : Activity() {
         currentThemeKey = themeKey
         prefs.edit().putString("app_theme", themeKey).apply()
         loadThemePreferences()
+        
+        // Обновляем цвета элементов главного экрана под новую тему
         titleApp.setTextColor(Color.parseColor(accentColorHex))
+        pingBtn.background = createRoundRect(accentCardBgHex, 20f, accentColorHex)
+        pingBtn.setTextColor(Color.parseColor(accentColorHex))
+        
         refreshSystemState()
         Toast.makeText(this, "Тема успешно изменена!", Toast.LENGTH_SHORT).show()
     }
@@ -360,13 +366,13 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
-        val pingBtn = Button(this).apply {
+        pingBtn = Button(this).apply {
             text = "📡 Проверка пинг (порт 853)"
             textSize = 11f
-            setTextColor(Color.WHITE)
+            setTextColor(Color.parseColor(accentColorHex))
             isAllCaps = false
             setPadding(22, 0, 22, 0)
-            background = createRoundRect("#00796B", 20f)
+            background = createRoundRect(accentCardBgHex, 20f, accentColorHex)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 88)
             setOnClickListener { checkNetworkAndTestAll() }
         }
@@ -496,7 +502,6 @@ class MainActivity : Activity() {
         dialogInstance?.show()
     }
 
-    // Диалог выбора цветовой темы
     private fun showThemeChooserDialog() {
         var themeDialog: AlertDialog? = null
 
