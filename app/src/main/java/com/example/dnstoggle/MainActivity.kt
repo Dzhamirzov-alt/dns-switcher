@@ -5,6 +5,7 @@ import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -12,6 +13,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -31,6 +33,9 @@ import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
+import rikka.shizuku.Shizuku
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import java.net.InetSocketAddress
 import java.net.Socket
 
@@ -54,7 +59,25 @@ class MainActivity : Activity() {
     private lateinit var rbOn: RadioButton
     private var isUpdatingUi = false
 
-    // Стандартный список серверов по умолчанию (со скриншота)
+    companion object {
+        private const val REQ_EXPORT_FILE = 1001
+        private const val REQ_IMPORT_FILE = 1002
+        private const val REQ_SHIZUKU_PERMISSION = 1003
+    }
+
+    private val shizukuPermissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
+        if (requestCode == REQ_SHIZUKU_PERMISSION) {
+            if (grantResult == PackageManager.PERMISSION_GRANTED) {
+                grantPermissionViaShizuku()
+            } else {
+                runOnUiThread {
+                    Toast.makeText(this, "Доступ к Shizuku отклонён", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    // Стандартный список серверов по умолчанию
     private val defaultServers = listOf(
         DnsServer("Comss.one", "dns.comss.one"),
         DnsServer("Мобильная -1", "comss.dns.controld.com"),
@@ -87,8 +110,18 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("dns_prefs", Context.MODE_PRIVATE)
+        try {
+            Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
+        } catch (_: Throwable) {}
         loadServers()
         setupUI()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        try {
+            Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener)
+        } catch (_: Throwable) {}
     }
 
     override fun onResume() {
@@ -99,6 +132,54 @@ class MainActivity : Activity() {
 
     private fun hasPermission(): Boolean {
         return checkSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED
+    }
+
+    // Проверка и запрос прав через Shizuku в 1 клик
+    private fun requestShizukuOneClick() {
+        try {
+            if (!Shizuku.pingBinder()) {
+                Toast.makeText(this, "Shizuku не запущен! Откройте приложение Shizuku и запустите сервис.", Toast.LENGTH_LONG).show()
+                return
+            }
+            if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
+                grantPermissionViaShizuku()
+            } else {
+                Shizuku.requestPermission(REQ_SHIZUKU_PERMISSION)
+            }
+        } catch (e: Throwable) {
+            Toast.makeText(this, "Ошибка обращения к Shizuku: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // Выполнение команды pm grant напрямую через сервис Shizuku
+    private fun grantPermissionViaShizuku() {
+        Thread {
+            try {
+                val method = Shizuku::class.java.getDeclaredMethod(
+                    "newProcess",
+                    Array<String>::class.java,
+                    Array<String>::class.java,
+                    String::class.java
+                )
+                method.isAccessible = true
+                val cmd = arrayOf("pm", "grant", packageName, android.Manifest.permission.WRITE_SECURE_SETTINGS)
+                val process = method.invoke(null, cmd, null, null) as Process
+                val exitCode = process.waitFor()
+
+                runOnUiThread {
+                    refreshSystemState()
+                    if (hasPermission()) {
+                        Toast.makeText(this, "✅ Разрешение успешно выдано через Shizuku!", Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(this, "Не удалось выдать права (код: $exitCode)", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (e: Throwable) {
+                runOnUiThread {
+                    Toast.makeText(this, "Ошибка Shizuku: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
     }
 
     private fun setupUI() {
@@ -377,7 +458,7 @@ class MainActivity : Activity() {
             statusBanner.visibility = View.GONE
         } else {
             statusBanner.visibility = View.VISIBLE
-            statusBanner.text = "⚠️ Нет разрешения WRITE_SECURE_SETTINGS.\nНажми сюда, чтобы скопировать команду для ADB или Shizuku."
+            statusBanner.text = "⚠️ Нет разрешения WRITE_SECURE_SETTINGS.\nНажми сюда, чтобы выдать права через Shizuku в 1 клик или скопировать команду ADB."
         }
 
         when (mode) {
@@ -622,10 +703,109 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun buildBackupJsonString(): String {
+        val jsonArray = JSONArray()
+        for (s in serverList) {
+            val obj = JSONObject()
+            obj.put("name", s.name)
+            obj.put("host", s.host)
+            jsonArray.put(obj)
+        }
+        return jsonArray.toString(2)
+    }
+
+    private fun importServersFromJsonString(jsonText: String) {
+        try {
+            val arr = JSONArray(jsonText)
+            var imported = 0
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                val name = obj.optString("name")
+                val host = sanitizeHost(obj.optString("host"))
+                if (host.isNotEmpty() && serverList.none { it.host.equals(host, true) }) {
+                    val finalName = if (name.isEmpty()) host else name
+                    serverList.add(DnsServer(finalName, host))
+                    imported++
+                }
+            }
+            saveServers()
+            checkNetworkAndTestAll()
+            Toast.makeText(this, "✅ Импортировано серверов: $imported", Toast.LENGTH_LONG).show()
+        } catch (_: Exception) {
+            Toast.makeText(this, "Ошибка формата JSON!", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun exportBackupToFile() {
+        try {
+            val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "application/json"
+                putExtra(Intent.EXTRA_TITLE, "dns_switcher_backup.json")
+            }
+            startActivityForResult(intent, REQ_EXPORT_FILE)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Ошибка открытия проводника: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun importBackupFromFile() {
+        try {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+            }
+            startActivityForResult(intent, REQ_IMPORT_FILE)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Ошибка открытия проводника: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode != RESULT_OK || data == null) return
+        val uri: Uri = data.data ?: return
+
+        if (requestCode == REQ_EXPORT_FILE) {
+            try {
+                val jsonStr = buildBackupJsonString()
+                val outStream = contentResolver.openOutputStream(uri)
+                if (outStream != null) {
+                    outStream.write(jsonStr.toByteArray(Charsets.UTF_8))
+                    outStream.flush()
+                    outStream.close()
+                    Toast.makeText(this, "✅ Бэкап сохранён в файл!", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(this, "Ошибка сохранения файла: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        } else if (requestCode == REQ_IMPORT_FILE) {
+            try {
+                val inStream = contentResolver.openInputStream(uri)
+                if (inStream != null) {
+                    val reader = BufferedReader(InputStreamReader(inStream, Charsets.UTF_8))
+                    val sb = StringBuilder()
+                    var line: String? = reader.readLine()
+                    while (line != null) {
+                        sb.append(line).append("\n")
+                        line = reader.readLine()
+                    }
+                    reader.close()
+                    inStream.close()
+                    importServersFromJsonString(sb.toString())
+                }
+            } catch (e: Exception) {
+                Toast.makeText(this, "Ошибка чтения файла: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     private fun showBackupDialog() {
         val options = arrayOf(
-            "📤 Экспорт (скопировать JSON в буфер)",
-            "📥 Импорт (добавить из буфера обмена)",
+            "💾 Сохранить бэкап в файл (.json)",
+            "📂 Загрузить бэкап из файла (.json)",
+            "📤 Скопировать JSON в буфер обмена",
+            "📥 Вставить JSON из буфера обмена",
             "🔄 Сбросить к стандартным 7 серверам"
         )
 
@@ -634,44 +814,21 @@ class MainActivity : Activity() {
             .setItems(options) { _, which ->
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 when (which) {
-                    0 -> {
-                        val jsonArray = JSONArray()
-                        for (s in serverList) {
-                            val obj = JSONObject()
-                            obj.put("name", s.name)
-                            obj.put("host", s.host)
-                            jsonArray.put(obj)
-                        }
-                        clipboard.setPrimaryClip(ClipData.newPlainText("dns_backup", jsonArray.toString(2)))
+                    0 -> exportBackupToFile()
+                    1 -> importBackupFromFile()
+                    2 -> {
+                        clipboard.setPrimaryClip(ClipData.newPlainText("dns_backup", buildBackupJsonString()))
                         Toast.makeText(this, "Список скопирован в буфер обмена!", Toast.LENGTH_LONG).show()
                     }
-                    1 -> {
+                    3 -> {
                         val clipText = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
                         if (clipText.isEmpty()) {
                             Toast.makeText(this, "Буфер обмена пуст!", Toast.LENGTH_SHORT).show()
-                            return@setItems
-                        }
-                        try {
-                            val arr = JSONArray(clipText)
-                            var imported = 0
-                            for (i in 0 until arr.length()) {
-                                val obj = arr.getJSONObject(i)
-                                val name = obj.optString("name")
-                                val host = sanitizeHost(obj.optString("host"))
-                                if (host.isNotEmpty() && serverList.none { it.host.equals(host, true) }) {
-                                    val finalName = if (name.isEmpty()) host else name
-                                    serverList.add(DnsServer(finalName, host))
-                                    imported++
-                                }
-                            }
-                            saveServers()
-                            checkNetworkAndTestAll()
-                            Toast.makeText(this, "Импортировано серверов: $imported", Toast.LENGTH_LONG).show()
-                        } catch (_: Exception) {
-                            Toast.makeText(this, "Ошибка формата JSON в буфере!", Toast.LENGTH_LONG).show()
+                        } else {
+                            importServersFromJsonString(clipText)
                         }
                     }
-                    2 -> {
+                    4 -> {
                         serverList.clear()
                         for (d in defaultServers) {
                             serverList.add(DnsServer(d.name, d.host))
@@ -690,22 +847,20 @@ class MainActivity : Activity() {
         val adbCommand = "adb shell pm grant $packageName android.permission.WRITE_SECURE_SETTINGS"
         val shizukuCommand = "pm grant $packageName android.permission.WRITE_SECURE_SETTINGS"
 
-        val msg = "Для переключения системного DNS требуется однократное разрешение.\n\n" +
+        val msg = "Вы можете выдать разрешение в 1 клик напрямую через запущенный Shizuku или вручную через консоль:\n\n" +
                 "Через ПК (ADB):\n$adbCommand\n\n" +
-                "Через Shizuku / LADB / aShell на телефоне:\n$shizukuCommand"
+                "Через терминал (aShell / LADB):\n$shizukuCommand"
 
         AlertDialog.Builder(this)
             .setTitle("🔑 Системное разрешение")
             .setMessage(msg)
-            .setPositiveButton("Скопировать для ADB") { _, _ ->
+            .setPositiveButton("⚡ Выдать через Shizuku (в 1 клик)") { _, _ ->
+                requestShizukuOneClick()
+            }
+            .setNeutralButton("Скопировать для ADB") { _, _ ->
                 val cb = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 cb.setPrimaryClip(ClipData.newPlainText("adb", adbCommand))
                 Toast.makeText(this, "Команда ADB скопирована", Toast.LENGTH_SHORT).show()
-            }
-            .setNeutralButton("Скопировать для Shizuku") { _, _ ->
-                val cb = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                cb.setPrimaryClip(ClipData.newPlainText("shizuku", shizukuCommand))
-                Toast.makeText(this, "Команда для Shizuku скопирована", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Закрыть", null)
             .show()
