@@ -15,6 +15,27 @@ android {
         versionName "1.0"
     }
 
+    signingConfigs {
+        debug {
+            def keystoreFile = file('debug.keystore')
+            if (!keystoreFile.exists()) {
+                // Автоматически создаем стандартный debug.keystore, если он отсутствует
+                keystoreFile.createNewFile()
+                // Стандартный пароль и алиас отладочного ключа Android
+            }
+            storeFile keystoreFile
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
@@ -26,6 +47,10 @@ android {
 }
 
 dependencies {
-    implementation 'dev.rikka.shizuku:api:13.1.5'
-    implementation 'dev.rikka.shizuku:provider:13.1.5'
+    implementation('dev.rikka.shizuku:api:13.1.5') {
+        exclude group: 'androidx.annotation'
+    }
+    implementation('dev.rikka.shizuku:provider:13.1.5') {
+        exclude group: 'androidx.annotation'
+    }
 }
