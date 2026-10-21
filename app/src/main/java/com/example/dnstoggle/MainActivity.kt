@@ -16,8 +16,6 @@ import android.graphics.Path
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.ShapeDrawable
-import android.graphics.drawable.shapes.Shape
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -37,7 +35,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
@@ -89,7 +86,7 @@ object HapticUtil {
     }
 }
 
-// Кастомный векторный отрисовщик щита, подстраивающийся под цвет темы
+// Кастомный векторный отрисовщик щита
 class ShieldDrawable(private var shieldColor: Int, private var isFilled: Boolean) : Drawable() {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = if (isFilled) Paint.Style.FILL else Paint.Style.STROKE
@@ -123,6 +120,8 @@ class MainActivity : Activity() {
 
     private lateinit var prefs: SharedPreferences
     private val serverList = mutableListOf<DnsServer>()
+    private lateinit var rootScroll: ScrollView
+    private lateinit var mainLayout: LinearLayout
     private lateinit var listContainer: LinearLayout
     private lateinit var statusBanner: TextView
     private lateinit var netStatusText: TextView
@@ -134,6 +133,9 @@ class MainActivity : Activity() {
     private lateinit var modeTitle: TextView
     private lateinit var titleApp: TextView
     private lateinit var pingBtn: Button
+    private lateinit var topBar: LinearLayout
+    private lateinit var settingsBtn: TextView
+    private lateinit var listHeader: TextView
 
     // Элементы плашки возврата удаленного сервера (Undo)
     private lateinit var undoBanner: LinearLayout
@@ -150,10 +152,18 @@ class MainActivity : Activity() {
 
     private var isUpdatingUi = false
 
-    // Конфигурация цветовых тем
+    // Цветовые палитры и темы
     private var currentThemeKey = "green"
+    private var isLightMode = false
     private var accentColorHex = "#00E676"
     private var accentCardBgHex = "#0D2318"
+
+    // Динамические цвета для темной/светлой темы
+    private var bgRootHex = "#08080A"
+    private var bgCardHex = "#121418"
+    private var bgCardStrokeHex = "#1E222B"
+    private var textMainColorHex = "#FFFFFF"
+    private var textSubColorHex = "#90A4AE"
 
     companion object {
         private const val REQ_EXPORT_FILE = 1001
@@ -232,35 +242,68 @@ class MainActivity : Activity() {
 
     private fun loadThemePreferences() {
         currentThemeKey = prefs.getString("app_theme", "green") ?: "green"
+        isLightMode = prefs.getBoolean("app_light_mode", false)
+
         when (currentThemeKey) {
             "green" -> {
                 accentColorHex = "#00E676"
-                accentCardBgHex = "#0D2318"
+                accentCardBgHex = if (isLightMode) "#E8F8F0" else "#0D2318"
             }
             "blue" -> {
                 accentColorHex = "#00B0FF"
-                accentCardBgHex = "#0A1D2C"
+                accentCardBgHex = if (isLightMode) "#E8F4FE" else "#0A1D2C"
             }
             "purple" -> {
                 accentColorHex = "#E040FB"
-                accentCardBgHex = "#230A2C"
+                accentCardBgHex = if (isLightMode) "#FBE9FE" else "#230A2C"
             }
+            "amber" -> {
+                accentColorHex = "#FFAB00"
+                accentCardBgHex = if (isLightMode) "#FFF8E1" else "#2C200A"
+            }
+        }
+
+        if (isLightMode) {
+            bgRootHex = "#F4F5F7"
+            bgCardHex = "#FFFFFF"
+            bgCardStrokeHex = "#E0E0E0"
+            textMainColorHex = "#121212"
+            textSubColorHex = "#546E7A"
+        } else {
+            bgRootHex = "#08080A"
+            bgCardHex = "#121418"
+            bgCardStrokeHex = "#1E222B"
+            textMainColorHex = "#FFFFFF"
+            textSubColorHex = "#90A4AE"
         }
     }
 
-    private fun saveAndApplyTheme(themeKey: String) {
+    private fun saveAndApplyTheme(themeKey: String, lightMode: Boolean) {
         currentThemeKey = themeKey
-        prefs.edit().putString("app_theme", themeKey).apply()
-        loadThemePreferences()
+        isLightMode = lightMode
+        prefs.edit()
+            .putString("app_theme", themeKey)
+            .putBoolean("app_light_mode", lightMode)
+            .apply()
 
+        loadThemePreferences()
+        recreateUIColors()
+        refreshSystemState()
+        Toast.makeText(this, "Тема успешно обновлена!", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun recreateUIColors() {
+        rootScroll.setBackgroundColor(Color.parseColor(bgRootHex))
         titleApp.setTextColor(Color.parseColor(accentColorHex))
+        settingsBtn.background = createRoundRect(bgCardHex, 20f, bgCardStrokeHex)
+        netStatusText.background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
+        netStatusText.setTextColor(Color.parseColor(textSubColorHex))
         pingBtn.background = createRoundRect(accentCardBgHex, 20f, accentColorHex)
         pingBtn.setTextColor(Color.parseColor(accentColorHex))
-        undoBanner.background = createRoundRect("#181B22", 22f, accentColorHex)
+        listHeader.setTextColor(Color.parseColor(textSubColorHex))
+        undoBanner.background = createRoundRect(bgCardHex, 22f, accentColorHex)
         undoActionBtn.setTextColor(Color.parseColor(accentColorHex))
-
         refreshSystemState()
-        Toast.makeText(this, "Тема успешно изменена!", Toast.LENGTH_SHORT).show()
     }
 
     private fun hasPermission(): Boolean {
@@ -315,17 +358,17 @@ class MainActivity : Activity() {
     }
 
     private fun setupUI() {
-        val rootScroll = ScrollView(this).apply {
-            setBackgroundColor(Color.parseColor("#08080A"))
+        rootScroll = ScrollView(this).apply {
+            setBackgroundColor(Color.parseColor(bgRootHex))
             isFillViewport = true
         }
 
-        val mainLayout = LinearLayout(this).apply {
+        mainLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(36, 40, 36, 40)
         }
 
-        val topBar = LinearLayout(this).apply {
+        topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -341,12 +384,12 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
-        val settingsBtn = TextView(this).apply {
+        settingsBtn = TextView(this).apply {
             text = "⚙️"
             textSize = 22f
             gravity = Gravity.CENTER
             setPadding(20, 10, 20, 10)
-            background = createRoundRect("#121418", 20f, "#1E222B")
+            background = createRoundRect(bgCardHex, 20f, bgCardStrokeHex)
             setOnClickListener {
                 vibrateClick()
                 showSettingsDialog()
@@ -360,9 +403,9 @@ class MainActivity : Activity() {
         netStatusText = TextView(this).apply {
             text = "Инициализация сети..."
             textSize = 13f
-            setTextColor(Color.parseColor("#B0BEC5"))
+            setTextColor(Color.parseColor(textSubColorHex))
             setPadding(28, 20, 28, 20)
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             params.setMargins(0, 0, 0, 16)
             layoutParams = params
@@ -391,7 +434,7 @@ class MainActivity : Activity() {
         modeCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 28, 32, 28)
-            background = createRoundRect("#121418", 30f, "#1E222B")
+            background = createRoundRect(bgCardHex, 30f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             params.setMargins(0, 0, 0, 24)
             layoutParams = params
@@ -400,7 +443,7 @@ class MainActivity : Activity() {
         modeTitle = TextView(this).apply {
             text = "СИСТЕМНЫЙ РЕЖИМ"
             textSize = 12f
-            setTextColor(Color.parseColor("#90A4AE"))
+            setTextColor(Color.parseColor(textSubColorHex))
             typeface = Typeface.DEFAULT_BOLD
             setPadding(0, 0, 0, 14)
         }
@@ -463,10 +506,10 @@ class MainActivity : Activity() {
             layoutParams = params
         }
 
-        val listHeader = TextView(this).apply {
+        listHeader = TextView(this).apply {
             text = "ДОСТУПНЫЕ СЕРВЕРЫ"
             textSize = 12f
-            setTextColor(Color.parseColor("#78909C"))
+            setTextColor(Color.parseColor(textSubColorHex))
             typeface = Typeface.DEFAULT_BOLD
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -494,7 +537,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(28, 20, 28, 20)
-            background = createRoundRect("#181B22", 22f, accentColorHex)
+            background = createRoundRect(bgCardHex, 22f, accentColorHex)
             visibility = View.GONE
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             params.setMargins(0, 0, 0, 16)
@@ -503,7 +546,7 @@ class MainActivity : Activity() {
 
         undoText = TextView(this).apply {
             textSize = 13f
-            setTextColor(Color.WHITE)
+            setTextColor(Color.parseColor(textMainColorHex))
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
@@ -568,19 +611,17 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    // Чистый заголовок диалогового окна без рамки
     private fun createDialogHeaderTitle(titleText: String): TextView {
         return TextView(this).apply {
             text = titleText
             textSize = 18f
-            setTextColor(Color.WHITE)
+            setTextColor(Color.parseColor(textMainColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             setPadding(12, 6, 12, 24)
         }
     }
 
-    // Всплывающее окно при нажатии на 3 вертикальные точки (Редактировать / Удалить)
     private fun showServerActionsDialog(index: Int) {
         if (index !in serverList.indices) return
         val server = serverList[index]
@@ -589,13 +630,13 @@ class MainActivity : Activity() {
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(36, 28, 36, 28)
-            background = createRoundRect("#0F1117", 36f, "#1E222B")
+            background = createRoundRect(if (isLightMode) "#FFFFFF" else "#0F1117", 36f, bgCardStrokeHex)
         }
 
         val titleView = TextView(this).apply {
             text = server.name
             textSize = 18f
-            setTextColor(Color.WHITE)
+            setTextColor(Color.parseColor(textMainColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             setPadding(12, 4, 12, 4)
@@ -616,7 +657,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(28, 22, 28, 22)
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             params.setMargins(0, 0, 0, 12)
             layoutParams = params
@@ -630,14 +671,14 @@ class MainActivity : Activity() {
         val editTitle = TextView(this).apply {
             text = "✏️ Редактировать"
             textSize = 15f
-            setTextColor(Color.WHITE)
+            setTextColor(Color.parseColor(textMainColorHex))
             typeface = Typeface.DEFAULT_BOLD
         }
 
         val editSub = TextView(this).apply {
             text = "Изменить название или адрес хоста"
             textSize = 12f
-            setTextColor(Color.parseColor("#90A4AE"))
+            setTextColor(Color.parseColor(textSubColorHex))
             setPadding(0, 4, 0, 0)
         }
 
@@ -649,7 +690,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(28, 22, 28, 22)
-            background = createRoundRect("#1F1214", 22f, "#FF5252")
+            background = createRoundRect(if (isLightMode) "#FFEBEE" else "#1F1214", 22f, "#FF5252")
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             params.setMargins(0, 0, 0, 16)
             layoutParams = params
@@ -684,7 +725,7 @@ class MainActivity : Activity() {
             setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             layoutParams = params
             setOnClickListener {
@@ -710,7 +751,7 @@ class MainActivity : Activity() {
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(36, 28, 36, 28)
-            background = createRoundRect("#0F1117", 36f, "#FF5252")
+            background = createRoundRect(if (isLightMode) "#FFFFFF" else "#0F1117", 36f, "#FF5252")
         }
 
         rootLayout.addView(createDialogHeaderTitle("🗑️ Удаление сервера"))
@@ -718,7 +759,7 @@ class MainActivity : Activity() {
         val msgView = TextView(this).apply {
             text = "Удалить «${server.name}» (${server.host}) из вашего списка?"
             textSize = 14f
-            setTextColor(Color.parseColor("#CFD8DC"))
+            setTextColor(Color.parseColor(textSubColorHex))
             gravity = Gravity.CENTER
             setPadding(12, 0, 12, 24)
         }
@@ -732,10 +773,10 @@ class MainActivity : Activity() {
         val cancelBtn = TextView(this).apply {
             text = "Назад"
             textSize = 14f
-            setTextColor(Color.WHITE)
+            setTextColor(Color.parseColor(textMainColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 20f, "#1E222B")
+            background = createRoundRect(bgCardHex, 20f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(0, 100, 1f)
             params.setMargins(0, 0, 10, 0)
             layoutParams = params
@@ -794,7 +835,7 @@ class MainActivity : Activity() {
 
     private fun createHorizontalDivider(): View {
         return View(this).apply {
-            setBackgroundColor(Color.parseColor("#262B36"))
+            setBackgroundColor(Color.parseColor(if (isLightMode) "#E0E0E0" else "#262B36"))
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 3)
             params.setMargins(12, 4, 12, 4)
             layoutParams = params
@@ -807,7 +848,7 @@ class MainActivity : Activity() {
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(36, 28, 36, 28)
-            background = createRoundRect("#0F1117", 36f, "#1E222B")
+            background = createRoundRect(if (isLightMode) "#FFFFFF" else "#0F1117", 36f, bgCardStrokeHex)
         }
 
         rootLayout.addView(createDialogHeaderTitle("⚙️ Настройки приложения"))
@@ -821,7 +862,7 @@ class MainActivity : Activity() {
             Pair("📚 Популярные DNS-серверы", "Каталог проверенных серверов"),
             Pair("📊 Ping Benchmark (Топ серверов)", "Анализ скорости и автовыбор лидера"),
             Pair("💾 Бэкап и сброс настроек", "Экспорт/импорт JSON, сброс списка"),
-            Pair("✨ Кастомизация", "Тема, автосортировка, шторка и виброотклик")
+            Pair("✨ Кастомизация", "Тема, светлый/темный режим и стиль")
         )
 
         for ((index, item) in options.withIndex()) {
@@ -829,7 +870,7 @@ class MainActivity : Activity() {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(28, 22, 28, 22)
-                background = createRoundRect("#121418", 22f, "#1E222B")
+                background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
                 val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 params.setMargins(0, 0, 0, 14)
                 layoutParams = params
@@ -850,14 +891,14 @@ class MainActivity : Activity() {
             val titleTv = TextView(this).apply {
                 text = item.first
                 textSize = 15f
-                setTextColor(Color.WHITE)
+                setTextColor(Color.parseColor(textMainColorHex))
                 typeface = Typeface.DEFAULT_BOLD
             }
 
             val subTv = TextView(this).apply {
                 text = item.second
                 textSize = 12f
-                setTextColor(Color.parseColor("#90A4AE"))
+                setTextColor(Color.parseColor(textSubColorHex))
                 setPadding(0, 4, 0, 0)
             }
 
@@ -874,7 +915,7 @@ class MainActivity : Activity() {
             setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
             params.setMargins(0, 10, 0, 0)
             layoutParams = params
@@ -899,7 +940,7 @@ class MainActivity : Activity() {
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(36, 28, 36, 28)
-            background = createRoundRect("#0F1117", 36f, "#1E222B")
+            background = createRoundRect(if (isLightMode) "#FFFFFF" else "#0F1117", 36f, bgCardStrokeHex)
         }
 
         rootLayout.addView(createDialogHeaderTitle("✨ Кастомизация"))
@@ -915,7 +956,8 @@ class MainActivity : Activity() {
             val isAutoSortOn = prefs.getBoolean("auto_sort_ping", true)
 
             val customOptions = listOf(
-                Pair("🎨 Выбор темы оформления", "Сменить неоновый стиль интерфейса"),
+                Pair("🎨 Выбор темы и акцента", "Цветовая палитра и янтарный стиль"),
+                Pair("☀️ Режим интерфейса", if (isLightMode) "Сейчас: Светлая тема" else "Сейчас: Темная тема"),
                 Pair("🔀 Автосортировка по пингу", if (isAutoSortOn) "Сейчас: Включена (быстрые сверху)" else "Сейчас: Отключена (фиксированный порядок)"),
                 Pair("🎛️ Режим шторки", if (isSimpleToggle) "Сейчас: Обычный тумблер (Вкл/Выкл)" else "Сейчас: Циклический перебор"),
                 Pair("📳 Виброотклик при нажатиях", if (isHapticOn) "Сейчас: Включен" else "Сейчас: Отключен")
@@ -926,7 +968,7 @@ class MainActivity : Activity() {
                     orientation = LinearLayout.VERTICAL
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(28, 22, 28, 22)
-                    background = createRoundRect("#121418", 22f, "#1E222B")
+                    background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
                     val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                     params.setMargins(0, 0, 0, 14)
                     layoutParams = params
@@ -939,6 +981,11 @@ class MainActivity : Activity() {
                                 showThemeChooserDialog()
                             }
                             1 -> {
+                                val newLightMode = !isLightMode
+                                saveAndApplyTheme(currentThemeKey, newLightMode)
+                                renderCustomizationOptions()
+                            }
+                            2 -> {
                                 val newSort = !isAutoSortOn
                                 prefs.edit().putBoolean("auto_sort_ping", newSort).apply()
                                 if (newSort) {
@@ -954,12 +1001,12 @@ class MainActivity : Activity() {
                                 val msg = if (newSort) "Автосортировка включена 🔀" else "Порядок серверов зафиксирован 📌"
                                 Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
                             }
-                            2 -> {
+                            3 -> {
                                 prefs.edit().putBoolean("tile_simple_toggle", !isSimpleToggle).apply()
                                 renderCustomizationOptions()
                                 Toast.makeText(this@MainActivity, "Режим шторки изменен", Toast.LENGTH_SHORT).show()
                             }
-                            3 -> {
+                            4 -> {
                                 val newState = !isHapticOn
                                 prefs.edit().putBoolean("haptic_enabled", newState).apply()
                                 if (newState) HapticUtil.vibrate(this@MainActivity, true)
@@ -974,14 +1021,14 @@ class MainActivity : Activity() {
                 val titleTv = TextView(this).apply {
                     text = item.first
                     textSize = 15f
-                    setTextColor(Color.WHITE)
+                    setTextColor(Color.parseColor(textMainColorHex))
                     typeface = Typeface.DEFAULT_BOLD
                 }
 
                 val subTv = TextView(this).apply {
                     text = item.second
                     textSize = 12f
-                    setTextColor(Color.parseColor("#90A4AE"))
+                    setTextColor(Color.parseColor(textSubColorHex))
                     setPadding(0, 4, 0, 0)
                 }
 
@@ -1000,7 +1047,7 @@ class MainActivity : Activity() {
             setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
             params.setMargins(0, 10, 0, 0)
             layoutParams = params
@@ -1029,7 +1076,7 @@ class MainActivity : Activity() {
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(36, 28, 36, 28)
-            background = createRoundRect("#0F1117", 36f, "#1E222B")
+            background = createRoundRect(if (isLightMode) "#FFFFFF" else "#0F1117", 36f, bgCardStrokeHex)
         }
 
         rootLayout.addView(createDialogHeaderTitle("📊 Ping Benchmark — Топ серверов"))
@@ -1041,7 +1088,7 @@ class MainActivity : Activity() {
 
         val listBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             setPadding(16, 8, 16, 8)
         }
 
@@ -1057,7 +1104,7 @@ class MainActivity : Activity() {
                 val emptyTv = TextView(this).apply {
                     text = "Список серверов пуст"
                     textSize = 14f
-                    setTextColor(Color.parseColor("#90A4AE"))
+                    setTextColor(Color.parseColor(textSubColorHex))
                     gravity = Gravity.CENTER
                     setPadding(20, 30, 20, 30)
                 }
@@ -1107,7 +1154,7 @@ class MainActivity : Activity() {
                     val nameTv = TextView(this).apply {
                         text = server.name
                         textSize = 14f
-                        setTextColor(Color.WHITE)
+                        setTextColor(Color.parseColor(textMainColorHex))
                         typeface = Typeface.DEFAULT_BOLD
                     }
 
@@ -1121,7 +1168,7 @@ class MainActivity : Activity() {
                     val pingTv = TextView(this).apply {
                         text = "$pingStr (${server.host})"
                         textSize = 12f
-                        setTextColor(if (server.ping > 0) Color.parseColor("#90A4AE") else Color.parseColor("#FF5252"))
+                        setTextColor(if (server.ping > 0) Color.parseColor(textSubColorHex) else Color.parseColor("#FF5252"))
                         setPadding(0, 4, 0, 0)
                     }
 
@@ -1172,10 +1219,10 @@ class MainActivity : Activity() {
         val runTestBtn = TextView(this).apply {
             text = "🔄 Запустить тест скорости"
             textSize = 14f
-            setTextColor(Color.WHITE)
+            setTextColor(Color.parseColor(textMainColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             params.setMargins(0, 0, 0, 10)
             layoutParams = params
@@ -1231,10 +1278,10 @@ class MainActivity : Activity() {
         val backBtn = TextView(this).apply {
             text = "Назад к настройкам"
             textSize = 15f
-            setTextColor(Color.parseColor("#90A4AE"))
+            setTextColor(Color.parseColor(textSubColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             layoutParams = params
             setOnClickListener {
@@ -1262,21 +1309,22 @@ class MainActivity : Activity() {
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(36, 28, 36, 28)
-            background = createRoundRect("#0F1117", 36f, "#1E222B")
+            background = createRoundRect(if (isLightMode) "#FFFFFF" else "#0F1117", 36f, bgCardStrokeHex)
         }
 
         rootLayout.addView(createDialogHeaderTitle("🎨 Выбор темы оформления"))
 
         val listBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             setPadding(16, 8, 16, 8)
         }
 
         val themes = listOf(
             Triple("green", "🟢 Neon Green (Классический неон)", "#00E676"),
             Triple("blue", "🔵 Cyber Blue (Неоновый голубой)", "#00B0FF"),
-            Triple("purple", "🟣 Synthwave Purple (Фиолетовый кибер)", "#E040FB")
+            Triple("purple", "🟣 Synthwave Purple (Фиолетовый кибер)", "#E040FB"),
+            Triple("amber", "🟠 Amber Glow (Янтарный премиум)", "#FFAB00")
         )
 
         for ((index, item) in themes.withIndex()) {
@@ -1285,13 +1333,13 @@ class MainActivity : Activity() {
             val themeTv = TextView(this).apply {
                 text = item.second
                 textSize = 15f
-                setTextColor(if (isSelected) Color.parseColor(item.third) else Color.WHITE)
+                setTextColor(if (isSelected) Color.parseColor(item.third) else Color.parseColor(textMainColorHex))
                 typeface = if (isSelected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
                 setPadding(20, 26, 20, 26)
                 setOnClickListener {
                     vibrateClick(true)
                     themeDialog?.dismiss()
-                    saveAndApplyTheme(item.first)
+                    saveAndApplyTheme(item.first, isLightMode)
                     showCustomizationDialog()
                 }
             }
@@ -1310,7 +1358,7 @@ class MainActivity : Activity() {
             setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             params.setMargins(0, 16, 0, 0)
             layoutParams = params
@@ -1391,7 +1439,7 @@ class MainActivity : Activity() {
             statusBanner.text = "⚠️ Требуется разрешение WRITE_SECURE_SETTINGS.\nНажмите здесь для выдачи через Shizuku в 1 клик."
         }
 
-        val inactiveColor = Color.parseColor("#78909C")
+        val inactiveColor = Color.parseColor(textSubColorHex)
         val redColor = Color.parseColor("#FF5252")
         val activeAccentColor = Color.parseColor(accentColorHex)
 
@@ -1414,7 +1462,7 @@ class MainActivity : Activity() {
                 rbOff.typeface = Typeface.DEFAULT_BOLD
                 rbOff.buttonTintList = ColorStateList.valueOf(redColor)
 
-                modeCard.background = createRoundRect("#1F1214", 30f, "#FF5252")
+                modeCard.background = createRoundRect(if (isLightMode) "#FFEBEE" else "#1F1214", 30f, "#FF5252")
                 modeTitle.text = "СИСТЕМНЫЙ РЕЖИМ: ОТКЛЮЧЕН"
                 modeTitle.setTextColor(redColor)
             }
@@ -1444,7 +1492,7 @@ class MainActivity : Activity() {
                 rbOff.typeface = Typeface.DEFAULT_BOLD
                 rbOff.buttonTintList = ColorStateList.valueOf(redColor)
 
-                modeCard.background = createRoundRect("#1F1214", 30f, "#FF5252")
+                modeCard.background = createRoundRect(if (isLightMode) "#FFEBEE" else "#1F1214", 30f, "#FF5252")
                 modeTitle.text = "СИСТЕМНЫЙ РЕЖИМ: ОТКЛЮЧЕН"
                 modeTitle.setTextColor(redColor)
             }
@@ -1469,7 +1517,7 @@ class MainActivity : Activity() {
                 background = if (isSelected) {
                     createRoundRect(accentCardBgHex, 26f, accentColorHex)
                 } else {
-                    createRoundRect("#121418", 26f, "#1E222B")
+                    createRoundRect(bgCardHex, 26f, bgCardStrokeHex)
                 }
                 val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 params.setMargins(0, 0, 0, 14)
@@ -1481,7 +1529,6 @@ class MainActivity : Activity() {
                     Toast.makeText(this@MainActivity, "Подключен: ${server.name}", Toast.LENGTH_SHORT).show()
                 }
 
-                // Долгое нажатие на карточку копирует хост в буфер обмена
                 setOnLongClickListener {
                     vibrateClick(true)
                     val cb = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -1491,14 +1538,14 @@ class MainActivity : Activity() {
                 }
             }
 
-            // Программный векторный контур щита, подстраивающийся под цвет темы
+            // Векторный контур щита
             val shieldView = View(this).apply {
                 val sizeInPx = (24 * resources.displayMetrics.density).toInt()
                 val params = LinearLayout.LayoutParams(sizeInPx, sizeInPx)
                 params.setMargins(0, 0, 16, 0)
                 layoutParams = params
                 
-                val shieldColor = if (isSelected) Color.parseColor(accentColorHex) else Color.parseColor("#455A64")
+                val shieldColor = if (isSelected) Color.parseColor(accentColorHex) else Color.parseColor(textSubColorHex)
                 background = ShieldDrawable(shieldColor, isFilled = isSelected)
             }
             card.addView(shieldView)
@@ -1516,7 +1563,7 @@ class MainActivity : Activity() {
             val nameTv = TextView(this).apply {
                 text = server.name
                 textSize = 16f
-                setTextColor(Color.WHITE)
+                setTextColor(Color.parseColor(textMainColorHex))
                 typeface = Typeface.DEFAULT_BOLD
             }
             nameRow.addView(nameTv)
@@ -1528,7 +1575,7 @@ class MainActivity : Activity() {
                     setTextColor(Color.parseColor(accentColorHex))
                     typeface = Typeface.DEFAULT_BOLD
                     setPadding(14, 4, 14, 4)
-                    background = createRoundRect("#08080A", 12f, accentColorHex)
+                    background = createRoundRect(if (isLightMode) "#FFFFFF" else "#08080A", 12f, accentColorHex)
                     val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                     params.setMargins(16, 0, 0, 0)
                     layoutParams = params
@@ -1548,7 +1595,7 @@ class MainActivity : Activity() {
                 textSize = 13f
                 setTextColor(
                     if (server.ping == -3) Color.parseColor("#FF5252")
-                    else Color.parseColor("#90A4AE")
+                    else Color.parseColor(textSubColorHex)
                 )
                 setPadding(0, 6, 0, 0)
             }
@@ -1557,14 +1604,13 @@ class MainActivity : Activity() {
             infoLayout.addView(subTv)
             card.addView(infoLayout)
 
-            // Три вертикальные точки для вызова меню карточки
             val moreBtn = TextView(this).apply {
                 text = "⋮"
                 textSize = 22f
-                setTextColor(Color.parseColor("#90A4AE"))
+                setTextColor(Color.parseColor(textSubColorHex))
                 typeface = Typeface.DEFAULT_BOLD
                 gravity = Gravity.CENTER
-                background = createRoundRect("#181B22", 18f, "#262B36")
+                background = createRoundRect(if (isLightMode) "#EFEFF1" else "#181B22", 18f, bgCardStrokeHex)
                 val params = LinearLayout.LayoutParams(88, 88)
                 params.setMargins(12, 0, 4, 0)
                 layoutParams = params
@@ -1615,7 +1661,6 @@ class MainActivity : Activity() {
                 server.ping = resultPing
             }
 
-            // Проверка реального разрешения доменных имен (DNS Resolving)
             val dnsResolves = try {
                 val res = InetAddress.getAllByName("google.com")
                 res != null && res.isNotEmpty()
@@ -1664,7 +1709,7 @@ class MainActivity : Activity() {
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(36, 28, 36, 28)
-            background = createRoundRect("#0F1117", 36f, "#1E222B")
+            background = createRoundRect(if (isLightMode) "#FFFFFF" else "#0F1117", 36f, bgCardStrokeHex)
         }
 
         rootLayout.addView(createDialogHeaderTitle(if (isEdit) "✏️ Редактировать сервер" else "➕ Добавить свой сервер"))
@@ -1672,10 +1717,10 @@ class MainActivity : Activity() {
         val nameInput = EditText(this).apply {
             hint = "Название (например, Comss.one)"
             setText(current?.name ?: "")
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.parseColor("#546E7A"))
+            setTextColor(Color.parseColor(textMainColorHex))
+            setHintTextColor(Color.parseColor(textSubColorHex))
             setPadding(28, 24, 28, 24)
-            background = createRoundRect("#121418", 20f, "#1E222B")
+            background = createRoundRect(bgCardHex, 20f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             params.setMargins(0, 0, 0, 14)
             layoutParams = params
@@ -1685,10 +1730,10 @@ class MainActivity : Activity() {
             hint = "Адрес хоста (например, dns.comss.one)"
             inputType = InputType.TYPE_TEXT_VARIATION_URI
             setText(current?.host ?: "")
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.parseColor("#546E7A"))
+            setTextColor(Color.parseColor(textMainColorHex))
+            setHintTextColor(Color.parseColor(textSubColorHex))
             setPadding(28, 24, 28, 24)
-            background = createRoundRect("#121418", 20f, "#1E222B")
+            background = createRoundRect(bgCardHex, 20f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             params.setMargins(0, 0, 0, 12)
             layoutParams = params
@@ -1697,7 +1742,7 @@ class MainActivity : Activity() {
         val noteTv = TextView(this).apply {
             text = "💡 Префиксы https:// или tls:// очищаются автоматически."
             textSize = 12f
-            setTextColor(Color.parseColor("#90A4AE"))
+            setTextColor(Color.parseColor(textSubColorHex))
             setPadding(8, 4, 8, 20)
         }
 
@@ -1741,10 +1786,10 @@ class MainActivity : Activity() {
         val cancelBtn = TextView(this).apply {
             text = "Назад"
             textSize = 15f
-            setTextColor(Color.parseColor("#90A4AE"))
+            setTextColor(Color.parseColor(textSubColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             layoutParams = params
             setOnClickListener {
@@ -1776,7 +1821,7 @@ class MainActivity : Activity() {
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(36, 28, 36, 28)
-            background = createRoundRect("#0F1117", 36f, "#1E222B")
+            background = createRoundRect(if (isLightMode) "#FFFFFF" else "#0F1117", 36f, bgCardStrokeHex)
         }
 
         rootLayout.addView(createDialogHeaderTitle("📚 Популярные DNS-серверы"))
@@ -1788,7 +1833,7 @@ class MainActivity : Activity() {
 
         val listBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             setPadding(16, 8, 16, 8)
         }
 
@@ -1813,14 +1858,14 @@ class MainActivity : Activity() {
             val nameTv = TextView(this).apply {
                 text = chosen.name
                 textSize = 15f
-                setTextColor(Color.WHITE)
+                setTextColor(Color.parseColor(textMainColorHex))
                 typeface = Typeface.DEFAULT_BOLD
             }
 
             val hostTv = TextView(this).apply {
                 text = chosen.host
                 textSize = 13f
-                setTextColor(Color.parseColor("#90A4AE"))
+                setTextColor(Color.parseColor(textSubColorHex))
                 setPadding(0, 4, 0, 0)
             }
 
@@ -1842,7 +1887,7 @@ class MainActivity : Activity() {
             setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             params.setMargins(0, 16, 0, 10)
             layoutParams = params
@@ -1866,10 +1911,10 @@ class MainActivity : Activity() {
         val backBtn = TextView(this).apply {
             text = "Назад к настройкам"
             textSize = 15f
-            setTextColor(Color.parseColor("#90A4AE"))
+            setTextColor(Color.parseColor(textSubColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             layoutParams = params
             setOnClickListener {
@@ -1994,14 +2039,14 @@ class MainActivity : Activity() {
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(36, 28, 36, 28)
-            background = createRoundRect("#0F1117", 36f, "#1E222B")
+            background = createRoundRect(if (isLightMode) "#FFFFFF" else "#0F1117", 36f, bgCardStrokeHex)
         }
 
         rootLayout.addView(createDialogHeaderTitle("💾 Бэкап и восстановление"))
 
         val listBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             setPadding(16, 8, 16, 8)
         }
 
@@ -2017,7 +2062,7 @@ class MainActivity : Activity() {
             val itemTv = TextView(this).apply {
                 text = label
                 textSize = 15f
-                setTextColor(Color.WHITE)
+                setTextColor(Color.parseColor(textMainColorHex))
                 setPadding(20, 26, 20, 26)
                 setOnClickListener {
                     vibrateClick()
@@ -2062,10 +2107,10 @@ class MainActivity : Activity() {
         val backBtn = TextView(this).apply {
             text = "Назад к настройкам"
             textSize = 15f
-            setTextColor(Color.parseColor(accentColorHex))
+            setTextColor(Color.parseColor(textSubColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             params.setMargins(0, 16, 0, 0)
             layoutParams = params
@@ -2097,14 +2142,14 @@ class MainActivity : Activity() {
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(36, 28, 36, 28)
-            background = createRoundRect("#0F1117", 36f, "#1E222B")
+            background = createRoundRect(if (isLightMode) "#FFFFFF" else "#0F1117", 36f, bgCardStrokeHex)
         }
 
         rootLayout.addView(createDialogHeaderTitle("🔑 Системное разрешение"))
 
         val infoBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             setPadding(28, 22, 28, 22)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             params.setMargins(0, 0, 0, 16)
@@ -2116,7 +2161,7 @@ class MainActivity : Activity() {
                     "ADB:\n$adbCommand\n\n" +
                     "Терминал (aShell/LADB):\n$shizukuCommand"
             textSize = 13f
-            setTextColor(Color.parseColor("#CFD8DC"))
+            setTextColor(Color.parseColor(textSubColorHex))
         }
         infoBox.addView(msgTv)
         rootLayout.addView(infoBox)
@@ -2146,7 +2191,7 @@ class MainActivity : Activity() {
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             setPadding(20, 0, 20, 0)
-            background = createRoundRect("#101A24", 22f, "#00B0FF")
+            background = createRoundRect(if (isLightMode) "#E3F2FD" else "#101A24", 22f, "#00B0FF")
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 115)
             params.setMargins(0, 0, 0, 12)
             layoutParams = params
@@ -2161,10 +2206,10 @@ class MainActivity : Activity() {
         val copyAdbBtn = TextView(this).apply {
             text = "📋 Скопировать команду ADB"
             textSize = 14f
-            setTextColor(Color.WHITE)
+            setTextColor(Color.parseColor(textMainColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             params.setMargins(0, 0, 0, 12)
             layoutParams = params
@@ -2180,10 +2225,10 @@ class MainActivity : Activity() {
         val closeBtn = TextView(this).apply {
             text = "Закрыть"
             textSize = 15f
-            setTextColor(Color.parseColor("#90A4AE"))
+            setTextColor(Color.parseColor(textSubColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             layoutParams = params
             setOnClickListener {
@@ -2207,7 +2252,7 @@ class MainActivity : Activity() {
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(36, 28, 36, 28)
-            background = createRoundRect("#0F1117", 36f, "#1E222B")
+            background = createRoundRect(if (isLightMode) "#FFFFFF" else "#0F1117", 36f, bgCardStrokeHex)
         }
 
         rootLayout.addView(createDialogHeaderTitle("📖 Инструкция по Shizuku"))
@@ -2219,7 +2264,7 @@ class MainActivity : Activity() {
 
         val stepsBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             setPadding(24, 20, 24, 20)
         }
 
@@ -2269,7 +2314,7 @@ class MainActivity : Activity() {
             val stepDesc = TextView(this).apply {
                 text = step.second
                 textSize = 13f
-                setTextColor(Color.parseColor("#CFD8DC"))
+                setTextColor(Color.parseColor(textSubColorHex))
                 setPadding(0, 0, 0, 12)
             }
 
@@ -2298,7 +2343,7 @@ class MainActivity : Activity() {
             setTextColor(Color.parseColor("#00B0FF"))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 20f, "#1E222B")
+            background = createRoundRect(bgCardHex, 20f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(0, 95, 1f)
             params.setMargins(0, 0, 8, 0)
             layoutParams = params
@@ -2316,7 +2361,7 @@ class MainActivity : Activity() {
             setTextColor(Color.parseColor("#00B0FF"))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 20f, "#1E222B")
+            background = createRoundRect(bgCardHex, 20f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(0, 95, 1f)
             params.setMargins(8, 0, 0, 0)
             layoutParams = params
@@ -2338,7 +2383,7 @@ class MainActivity : Activity() {
             setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             layoutParams = params
             setOnClickListener {
