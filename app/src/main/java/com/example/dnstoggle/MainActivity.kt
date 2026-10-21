@@ -17,6 +17,8 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -40,6 +42,7 @@ import org.json.JSONObject
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 
@@ -94,6 +97,21 @@ class MainActivity : Activity() {
     private lateinit var modeTitle: TextView
     private lateinit var titleApp: TextView
     private lateinit var pingBtn: Button
+    private lateinit var smartConnectBtn: Button
+
+    // Элементы плашки возврата удаленного сервера (Undo)
+    private lateinit var undoBanner: LinearLayout
+    private lateinit var undoText: TextView
+    private lateinit var undoActionBtn: TextView
+    private var lastDeletedServer: DnsServer? = null
+    private var lastDeletedIndex: Int = -1
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private val hideUndoRunnable = Runnable {
+        if (::undoBanner.isInitialized) {
+            undoBanner.visibility = View.GONE
+        }
+    }
+
     private var isUpdatingUi = false
 
     // Конфигурация цветовых тем
@@ -160,6 +178,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        uiHandler.removeCallbacks(hideUndoRunnable)
         try {
             Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener)
         } catch (_: Throwable) {}
@@ -201,6 +220,10 @@ class MainActivity : Activity() {
         titleApp.setTextColor(Color.parseColor(accentColorHex))
         pingBtn.background = createRoundRect(accentCardBgHex, 20f, accentColorHex)
         pingBtn.setTextColor(Color.parseColor(accentColorHex))
+        smartConnectBtn.background = createRoundRect(accentCardBgHex, 20f, accentColorHex)
+        smartConnectBtn.setTextColor(Color.parseColor(accentColorHex))
+        undoBanner.background = createRoundRect("#181B22", 22f, accentColorHex)
+        undoActionBtn.setTextColor(Color.parseColor(accentColorHex))
 
         refreshSystemState()
         Toast.makeText(this, "Тема успешно изменена!", Toast.LENGTH_SHORT).show()
@@ -309,6 +332,10 @@ class MainActivity : Activity() {
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             params.setMargins(0, 0, 0, 16)
             layoutParams = params
+            setOnClickListener {
+                vibrateClick()
+                verifyActiveDnsInternet()
+            }
         }
         mainLayout.addView(netStatusText)
 
@@ -404,29 +431,90 @@ class MainActivity : Activity() {
 
         val listHeader = TextView(this).apply {
             text = "ДОСТУПНЫЕ СЕРВЕРЫ"
-            textSize = 12f
+            textSize = 11f
             setTextColor(Color.parseColor("#78909C"))
             typeface = Typeface.DEFAULT_BOLD
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
-        pingBtn = Button(this).apply {
-            text = "📡 Проверка пинг (порт 853)"
+        smartConnectBtn = Button(this).apply {
+            text = "⚡ Автовыбор"
             textSize = 11f
             setTextColor(Color.parseColor(accentColorHex))
             isAllCaps = false
-            setPadding(22, 0, 22, 0)
+            setPadding(20, 0, 20, 0)
             background = createRoundRect(accentCardBgHex, 20f, accentColorHex)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 88)
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 86)
+            params.setMargins(0, 0, 12, 0)
+            layoutParams = params
+            setOnClickListener {
+                vibrateClick(true)
+                smartConnectBestServer()
+            }
+        }
+
+        pingBtn = Button(this).apply {
+            text = "📡 Пинг (853)"
+            textSize = 11f
+            setTextColor(Color.parseColor(accentColorHex))
+            isAllCaps = false
+            setPadding(20, 0, 20, 0)
+            background = createRoundRect(accentCardBgHex, 20f, accentColorHex)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 86)
             setOnClickListener {
                 vibrateClick()
-                checkNetworkAndTestAll()
+                checkNetworkAndTestAll(false)
             }
         }
 
         headerRow.addView(listHeader)
+        headerRow.addView(smartConnectBtn)
         headerRow.addView(pingBtn)
         mainLayout.addView(headerRow)
+
+        // Плашка отмены удаления (Undo Banner)
+        undoBanner = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(28, 20, 28, 20)
+            background = createRoundRect("#181B22", 22f, accentColorHex)
+            visibility = View.GONE
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            params.setMargins(0, 0, 0, 16)
+            layoutParams = params
+        }
+
+        undoText = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+
+        undoActionBtn = TextView(this).apply {
+            text = "↩️ ВЕРНУТЬ"
+            textSize = 13f
+            setTextColor(Color.parseColor(accentColorHex))
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(20, 8, 8, 8)
+            setOnClickListener {
+                vibrateClick(true)
+                val restored = lastDeletedServer
+                if (restored != null) {
+                    val insertPos = lastDeletedIndex.coerceIn(0, serverList.size)
+                    serverList.add(insertPos, restored)
+                    lastDeletedServer = null
+                    saveServers()
+                    renderServerList()
+                    undoBanner.visibility = View.GONE
+                    uiHandler.removeCallbacks(hideUndoRunnable)
+                    Toast.makeText(this@MainActivity, "✅ Сервер «${restored.name}» восстановлен!", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        undoBanner.addView(undoText)
+        undoBanner.addView(undoActionBtn)
+        mainLayout.addView(undoBanner)
 
         listContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -435,6 +523,137 @@ class MainActivity : Activity() {
 
         rootScroll.addView(mainLayout)
         setContentView(rootScroll)
+    }
+
+    private fun smartConnectBestServer() {
+        val fastest = serverList.filter { it.ping > 0 }.minByOrNull { it.ping }
+        if (fastest != null) {
+            applyDnsMode("hostname", fastest.host)
+            Toast.makeText(this, "⚡ Подключен самый быстрый: ${fastest.name} (${fastest.ping} мс)", Toast.LENGTH_LONG).show()
+        } else {
+            Toast.makeText(this, "⏳ Замеряем скорость для выбора лучшего сервера...", Toast.LENGTH_SHORT).show()
+            checkNetworkAndTestAll(autoConnectBest = true)
+        }
+    }
+
+    private fun verifyActiveDnsInternet() {
+        netStatusText.text = "⏳ Проверка интернет-отклика и DNS-резолвинга..."
+        Thread {
+            val start = System.currentTimeMillis()
+            val isResolving = try {
+                val addresses = InetAddress.getAllByName("google.com")
+                addresses != null && addresses.isNotEmpty()
+            } catch (_: Exception) {
+                false
+            }
+            val elapsed = System.currentTimeMillis() - start
+            runOnUiThread {
+                val workingCount = serverList.count { it.ping > 0 }
+                if (isResolving) {
+                    vibrateClick()
+                    netStatusText.text = "🌐 DNS резолвинг: OK (${elapsed} мс) ✅ • DoT: $workingCount/${serverList.size}"
+                    Toast.makeText(this, "✅ DNS успешно разрешает домены ($elapsed мс)", Toast.LENGTH_SHORT).show()
+                } else {
+                    vibrateClick(true)
+                    netStatusText.text = "⚠️ Сбой разрешения доменов ❌ • DoT: $workingCount/${serverList.size}"
+                    Toast.makeText(this, "❌ Ошибка резолвинга! Проверьте выбранный DNS или сеть", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun showDeleteConfirmDialog(index: Int) {
+        if (index !in serverList.indices) return
+        val server = serverList[index]
+        var confirmDialog: AlertDialog? = null
+
+        val rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(36, 28, 36, 28)
+            background = createRoundRect("#0F1117", 36f, "#FF5252")
+        }
+
+        val titleView = TextView(this).apply {
+            text = "🗑️ Удаление сервера"
+            textSize = 17f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(0, 8, 0, 16)
+        }
+        rootLayout.addView(titleView)
+
+        val msgView = TextView(this).apply {
+            text = "Удалить «${server.name}» (${server.host}) из вашего списка?"
+            textSize = 14f
+            setTextColor(Color.parseColor("#CFD8DC"))
+            gravity = Gravity.CENTER
+            setPadding(12, 0, 12, 24)
+        }
+        rootLayout.addView(msgView)
+
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            weightSum = 2f
+        }
+
+        val cancelBtn = TextView(this).apply {
+            text = "Отмена"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 20f, "#1E222B")
+            val params = LinearLayout.LayoutParams(0, 100, 1f)
+            params.setMargins(0, 0, 10, 0)
+            layoutParams = params
+            setOnClickListener {
+                vibrateClick()
+                confirmDialog?.dismiss()
+            }
+        }
+
+        val deleteBtn = TextView(this).apply {
+            text = "Удалить"
+            textSize = 14f
+            setTextColor(Color.parseColor("#FF5252"))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#2A1215", 20f, "#FF5252")
+            val params = LinearLayout.LayoutParams(0, 100, 1f)
+            params.setMargins(10, 0, 0, 0)
+            layoutParams = params
+            setOnClickListener {
+                vibrateClick(true)
+                confirmDialog?.dismiss()
+                performRemoveWithUndo(index)
+            }
+        }
+
+        btnRow.addView(cancelBtn)
+        btnRow.addView(deleteBtn)
+        rootLayout.addView(btnRow)
+
+        confirmDialog = AlertDialog.Builder(this)
+            .setView(rootLayout)
+            .create()
+
+        confirmDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        confirmDialog?.show()
+    }
+
+    private fun performRemoveWithUndo(index: Int) {
+        if (index !in serverList.indices) return
+        lastDeletedServer = serverList[index]
+        lastDeletedIndex = index
+        serverList.removeAt(index)
+        saveServers()
+        renderServerList()
+
+        undoText.text = "Удален «${lastDeletedServer?.name}»"
+        undoBanner.visibility = View.VISIBLE
+        uiHandler.removeCallbacks(hideUndoRunnable)
+        uiHandler.postDelayed(hideUndoRunnable, 6000)
     }
 
     private fun createHorizontalDivider(): View {
@@ -475,7 +694,7 @@ class MainActivity : Activity() {
         rootLayout.addView(headerBox)
 
         val scrollView = ScrollView(this).apply {
-            val maxHeight = (resources.displayMetrics.heightPixels * 0.60).toInt()
+            val maxHeight = (resources.displayMetrics.heightPixels * 0.62).toInt()
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxHeight)
         }
 
@@ -485,13 +704,15 @@ class MainActivity : Activity() {
 
         val isHapticOn = prefs.getBoolean("haptic_enabled", true)
         val isSimpleToggle = prefs.getBoolean("tile_simple_toggle", true)
+        val isAutoSortOn = prefs.getBoolean("auto_sort_ping", true)
 
         val options = listOf(
             Pair("➕ Добавить свой сервер", "Ручной ввод хоста и имени"),
             Pair("📚 Популярные DNS-серверы", "Каталог проверенных серверов"),
-            Pair("📊 Ping Benchmark (Топ серверов)", "Анализ и рейтинг скорости DoT"),
+            Pair("📊 Ping Benchmark (Топ серверов)", "Анализ скорости и автовыбор лидера"),
             Pair("💾 Бэкап и сброс настроек", "Экспорт/импорт JSON, сброс списка"),
             Pair("🎨 Выбор темы оформления", "Сменить неоновый стиль интерфейса"),
+            Pair("🔀 Автосортировка по пингу", if (isAutoSortOn) "Сейчас: Включена (быстрые сверху)" else "Сейчас: Отключена (фиксированный порядок)"),
             Pair("🎛️ Режим шторки", if (isSimpleToggle) "Сейчас: Обычный тумблер (Вкл/Выкл)" else "Сейчас: Циклический перебор"),
             Pair("📳 Виброотклик при нажатиях", if (isHapticOn) "Сейчас: Включен" else "Сейчас: Отключен")
         )
@@ -516,10 +737,25 @@ class MainActivity : Activity() {
                         3 -> showBackupDialog()
                         4 -> showThemeChooserDialog()
                         5 -> {
+                            val newSort = !isAutoSortOn
+                            prefs.edit().putBoolean("auto_sort_ping", newSort).apply()
+                            if (newSort) {
+                                serverList.sortWith(Comparator { a, b ->
+                                    val pA = if (a.ping > 0) a.ping else Int.MAX_VALUE
+                                    val pB = if (b.ping > 0) b.ping else Int.MAX_VALUE
+                                    pA.compareTo(pB)
+                                })
+                                saveServers()
+                                renderServerList()
+                            }
+                            val msg = if (newSort) "Автосортировка по скорости включена 🔀" else "Порядок серверов зафиксирован 📌"
+                            Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
+                        }
+                        6 -> {
                             prefs.edit().putBoolean("tile_simple_toggle", !isSimpleToggle).apply()
                             Toast.makeText(this@MainActivity, "Режим шторки изменен", Toast.LENGTH_SHORT).show()
                         }
-                        6 -> {
+                        7 -> {
                             val newState = !isHapticOn
                             prefs.edit().putBoolean("haptic_enabled", newState).apply()
                             if (newState) HapticUtil.vibrate(this@MainActivity, true)
@@ -606,7 +842,7 @@ class MainActivity : Activity() {
         rootLayout.addView(headerBox)
 
         val scrollView = ScrollView(this).apply {
-            val maxHeight = (resources.displayMetrics.heightPixels * 0.50).toInt()
+            val maxHeight = (resources.displayMetrics.heightPixels * 0.46).toInt()
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxHeight)
         }
 
@@ -650,7 +886,14 @@ class MainActivity : Activity() {
                             vibrateClick(true)
                             benchDialog?.dismiss()
                             applyDnsMode("hostname", server.host)
-                            Toast.makeText(this@MainActivity, "Подключен лучший: ${server.name}", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this@MainActivity, "Подключен: ${server.name}", Toast.LENGTH_SHORT).show()
+                        }
+                        setOnLongClickListener {
+                            vibrateClick(true)
+                            val cb = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cb.setPrimaryClip(ClipData.newPlainText("dns_host", server.host))
+                            Toast.makeText(this@MainActivity, "📋 Скопировано: ${server.host}", Toast.LENGTH_SHORT).show()
+                            true
                         }
                     }
 
@@ -707,15 +950,39 @@ class MainActivity : Activity() {
         scrollView.addView(listBox)
         rootLayout.addView(scrollView)
 
-        val runTestBtn = TextView(this).apply {
-            text = "🔄 Запустить тест скорости"
+        val connectBestBtn = TextView(this).apply {
+            text = "⚡ Подключить самый быстрый (#1)"
             textSize = 14f
             setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
+            background = createRoundRect(accentCardBgHex, 22f, accentColorHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             params.setMargins(0, 16, 0, 10)
+            layoutParams = params
+            setOnClickListener {
+                vibrateClick(true)
+                val best = serverList.filter { it.ping > 0 }.minByOrNull { it.ping }
+                if (best != null) {
+                    benchDialog?.dismiss()
+                    applyDnsMode("hostname", best.host)
+                    Toast.makeText(this@MainActivity, "⚡ Подключен лидер: ${best.name} (${best.ping} мс)", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this@MainActivity, "Сначала дождитесь завершения теста скорости", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        rootLayout.addView(connectBestBtn)
+
+        val runTestBtn = TextView(this).apply {
+            text = "🔄 Запустить тест скорости"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            params.setMargins(0, 0, 0, 10)
             layoutParams = params
             setOnClickListener {
                 vibrateClick()
@@ -747,11 +1014,13 @@ class MainActivity : Activity() {
                     }
 
                     runOnUiThread {
-                        serverList.sortWith(Comparator { a, b ->
-                            val pA = if (a.ping > 0) a.ping else Int.MAX_VALUE
-                            val pB = if (b.ping > 0) b.ping else Int.MAX_VALUE
-                            pA.compareTo(pB)
-                        })
+                        if (prefs.getBoolean("auto_sort_ping", true)) {
+                            serverList.sortWith(Comparator { a, b ->
+                                val pA = if (a.ping > 0) a.ping else Int.MAX_VALUE
+                                val pB = if (b.ping > 0) b.ping else Int.MAX_VALUE
+                                pA.compareTo(pB)
+                            })
+                        }
                         saveServers()
                         text = "🔄 Запустить тест скорости"
                         populateBenchmarkList()
@@ -1026,6 +1295,15 @@ class MainActivity : Activity() {
                     applyDnsMode("hostname", server.host)
                     Toast.makeText(this@MainActivity, "Подключен: ${server.name}", Toast.LENGTH_SHORT).show()
                 }
+
+                // Долгое нажатие на карточку копирует хост в буфер обмена
+                setOnLongClickListener {
+                    vibrateClick(true)
+                    val cb = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    cb.setPrimaryClip(ClipData.newPlainText("dns_host", server.host))
+                    Toast.makeText(this@MainActivity, "📋 Адрес скопирован: ${server.host}", Toast.LENGTH_SHORT).show()
+                    true
+                }
             }
 
             val infoLayout = LinearLayout(this).apply {
@@ -1084,10 +1362,8 @@ class MainActivity : Activity() {
                 val params = LinearLayout.LayoutParams(88, 88)
                 layoutParams = params
                 setOnClickListener {
-                    vibrateClick(true)
-                    serverList.removeAt(index)
-                    saveServers()
-                    renderServerList()
+                    vibrateClick()
+                    showDeleteConfirmDialog(index)
                 }
             }
 
@@ -1097,7 +1373,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun checkNetworkAndTestAll() {
+    private fun checkNetworkAndTestAll(autoConnectBest: Boolean = false) {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val net = cm.activeNetwork
         val caps = cm.getNetworkCapabilities(net)
@@ -1109,7 +1385,7 @@ class MainActivity : Activity() {
             caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "VPN 🔒"
             else -> "Сеть активна 🌐"
         }
-        netStatusText.text = "$netType • Проверка порта 853..."
+        netStatusText.text = "$netType • Проверка порта 853 и DNS..."
 
         for (s in serverList) s.ping = -2
         renderServerList()
@@ -1133,16 +1409,38 @@ class MainActivity : Activity() {
                 server.ping = resultPing
             }
 
+            // Проверка реального разрешения доменных имен (DNS Resolving)
+            val dnsResolves = try {
+                val res = InetAddress.getAllByName("google.com")
+                res != null && res.isNotEmpty()
+            } catch (_: Exception) {
+                false
+            }
+
             runOnUiThread {
-                serverList.sortWith(Comparator { a, b ->
-                    val pA = if (a.ping > 0) a.ping else Int.MAX_VALUE
-                    val pB = if (b.ping > 0) b.ping else Int.MAX_VALUE
-                    pA.compareTo(pB)
-                })
+                if (prefs.getBoolean("auto_sort_ping", true)) {
+                    serverList.sortWith(Comparator { a, b ->
+                        val pA = if (a.ping > 0) a.ping else Int.MAX_VALUE
+                        val pB = if (b.ping > 0) b.ping else Int.MAX_VALUE
+                        pA.compareTo(pB)
+                    })
+                }
                 saveServers()
                 val workingCount = serverList.count { it.ping > 0 }
-                netStatusText.text = "$netType • Доступно DoT (853): $workingCount из ${serverList.size}"
+                val resolveBadge = if (dnsResolves) "DNS: OK ✅" else "DNS: Сбой ⚠️"
+                netStatusText.text = "$netType • DoT: $workingCount/${serverList.size} • $resolveBadge"
                 renderServerList()
+
+                if (autoConnectBest) {
+                    val best = serverList.filter { it.ping > 0 }.minByOrNull { it.ping }
+                    if (best != null) {
+                        vibrateClick(true)
+                        applyDnsMode("hostname", best.host)
+                        Toast.makeText(this, "⚡ Автовыбор: подключен ${best.name} (${best.ping} мс)", Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(this, "❌ Нет доступных серверов по порту 853", Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
         }.start()
     }
