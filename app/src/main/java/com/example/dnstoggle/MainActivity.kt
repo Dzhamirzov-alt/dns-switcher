@@ -160,11 +160,11 @@ class MainActivity : Activity() {
         currentThemeKey = themeKey
         prefs.edit().putString("app_theme", themeKey).apply()
         loadThemePreferences()
-        
+
         titleApp.setTextColor(Color.parseColor(accentColorHex))
         pingBtn.background = createRoundRect(accentCardBgHex, 20f, accentColorHex)
         pingBtn.setTextColor(Color.parseColor(accentColorHex))
-        
+
         refreshSystemState()
         Toast.makeText(this, "Тема успешно изменена!", Toast.LENGTH_SHORT).show()
     }
@@ -503,7 +503,6 @@ class MainActivity : Activity() {
         dialogInstance?.show()
     }
 
-    // Экран Ping Benchmark (тест происходит прямо внутри окна без его закрытия)
     private fun showBenchmarkDialog() {
         var benchDialog: AlertDialog? = null
 
