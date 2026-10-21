@@ -17,6 +17,9 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.provider.Settings
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
@@ -45,6 +48,36 @@ data class DnsServer(
     var host: String,
     var ping: Int = -1
 )
+
+// Универсальный контроллер тактильного виброотклика
+object HapticUtil {
+    fun vibrate(context: Context, isStrong: Boolean = false) {
+        val prefs = context.getSharedPreferences("dns_prefs", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("haptic_enabled", true)) return
+
+        try {
+            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+                vm.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            }
+
+            if (!vibrator.hasVibrator()) return
+
+            val duration = if (isStrong) 45L else 25L
+            val amplitude = if (isStrong) 180 else 90
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createOneShot(duration, amplitude))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(duration)
+            }
+        } catch (_: Exception) {}
+    }
+}
 
 class MainActivity : Activity() {
 
@@ -138,6 +171,10 @@ class MainActivity : Activity() {
         checkNetworkAndTestAll()
     }
 
+    private fun vibrateClick(strong: Boolean = false) {
+        HapticUtil.vibrate(this, strong)
+    }
+
     private fun loadThemePreferences() {
         currentThemeKey = prefs.getString("app_theme", "green") ?: "green"
         when (currentThemeKey) {
@@ -206,6 +243,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     refreshSystemState()
                     if (hasPermission()) {
+                        vibrateClick(true)
                         Toast.makeText(this, "⚡ Права успешно выданы через Shizuku!", Toast.LENGTH_LONG).show()
                     } else {
                         Toast.makeText(this, "Не удалось выдать права (код: $exitCode)", Toast.LENGTH_LONG).show()
@@ -252,7 +290,10 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             setPadding(20, 10, 20, 10)
             background = createRoundRect("#121418", 20f, "#1E222B")
-            setOnClickListener { showSettingsDialog() }
+            setOnClickListener {
+                vibrateClick()
+                showSettingsDialog()
+            }
         }
 
         topBar.addView(titleApp)
@@ -279,7 +320,10 @@ class MainActivity : Activity() {
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             params.setMargins(0, 0, 0, 20)
             layoutParams = params
-            setOnClickListener { showAdbDialog() }
+            setOnClickListener {
+                vibrateClick()
+                showAdbDialog()
+            }
         }
         mainLayout.addView(statusBanner)
 
@@ -331,6 +375,7 @@ class MainActivity : Activity() {
 
         modeGroup.setOnCheckedChangeListener { _, checkedId ->
             if (isUpdatingUi) return@setOnCheckedChangeListener
+            vibrateClick(true)
             when (checkedId) {
                 rbOff.id -> applyDnsMode("off", null)
                 rbAuto.id -> applyDnsMode("opportunistic", null)
@@ -373,7 +418,10 @@ class MainActivity : Activity() {
             setPadding(22, 0, 22, 0)
             background = createRoundRect(accentCardBgHex, 20f, accentColorHex)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 88)
-            setOnClickListener { checkNetworkAndTestAll() }
+            setOnClickListener {
+                vibrateClick()
+                checkNetworkAndTestAll()
+            }
         }
 
         headerRow.addView(listHeader)
@@ -412,7 +460,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             background = createRoundRect("#121418", 22f, "#1E222B")
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 115)
-            params.setMargins(0, 0, 0, 24)
+            params.setMargins(0, 0, 0, 20)
             layoutParams = params
         }
 
@@ -426,26 +474,40 @@ class MainActivity : Activity() {
         headerBox.addView(titleView)
         rootLayout.addView(headerBox)
 
+        val scrollView = ScrollView(this).apply {
+            val maxHeight = (resources.displayMetrics.heightPixels * 0.60).toInt()
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxHeight)
+        }
+
+        val optionsContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        val isHapticOn = prefs.getBoolean("haptic_enabled", true)
+        val isSimpleToggle = prefs.getBoolean("tile_simple_toggle", true)
+
         val options = listOf(
             Pair("➕ Добавить свой сервер", "Ручной ввод хоста и имени"),
             Pair("📚 Популярные DNS-серверы", "Каталог проверенных серверов"),
             Pair("📊 Ping Benchmark (Топ серверов)", "Анализ и рейтинг скорости DoT"),
             Pair("💾 Бэкап и сброс настроек", "Экспорт/импорт JSON, сброс списка"),
             Pair("🎨 Выбор темы оформления", "Сменить неоновый стиль интерфейса"),
-            Pair("🎛️ Режим шторки", if (prefs.getBoolean("tile_simple_toggle", true)) "Сейчас: Обычный тумблер (Вкл/Выкл)" else "Сейчас: Циклический перебор")
+            Pair("🎛️ Режим шторки", if (isSimpleToggle) "Сейчас: Обычный тумблер (Вкл/Выкл)" else "Сейчас: Циклический перебор"),
+            Pair("📳 Виброотклик при нажатиях", if (isHapticOn) "Сейчас: Включен" else "Сейчас: Отключен")
         )
 
         for ((index, item) in options.withIndex()) {
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(28, 22, 28, 22)
+                setPadding(28, 20, 28, 20)
                 background = createRoundRect("#121418", 22f, "#1E222B")
                 val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                params.setMargins(0, 0, 0, 14)
+                params.setMargins(0, 0, 0, 12)
                 layoutParams = params
 
                 setOnClickListener {
+                    vibrateClick()
                     dialogInstance?.dismiss()
                     when (index) {
                         0 -> showEditServerDialog(null)
@@ -454,9 +516,15 @@ class MainActivity : Activity() {
                         3 -> showBackupDialog()
                         4 -> showThemeChooserDialog()
                         5 -> {
-                            val isToggle = prefs.getBoolean("tile_simple_toggle", true)
-                            prefs.edit().putBoolean("tile_simple_toggle", !isToggle).apply()
+                            prefs.edit().putBoolean("tile_simple_toggle", !isSimpleToggle).apply()
                             Toast.makeText(this@MainActivity, "Режим шторки изменен", Toast.LENGTH_SHORT).show()
+                        }
+                        6 -> {
+                            val newState = !isHapticOn
+                            prefs.edit().putBoolean("haptic_enabled", newState).apply()
+                            if (newState) HapticUtil.vibrate(this@MainActivity, true)
+                            val msg = if (newState) "Виброотклик включен 📳" else "Виброотклик отключен 🔇"
+                            Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
                         }
                     }
                 }
@@ -478,8 +546,11 @@ class MainActivity : Activity() {
 
             card.addView(titleTv)
             card.addView(subTv)
-            rootLayout.addView(card)
+            optionsContainer.addView(card)
         }
+
+        scrollView.addView(optionsContainer)
+        rootLayout.addView(scrollView)
 
         val closeBtn = TextView(this).apply {
             text = "Закрыть"
@@ -489,9 +560,12 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             background = createRoundRect("#121418", 22f, "#1E222B")
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
-            params.setMargins(0, 10, 0, 0)
+            params.setMargins(0, 12, 0, 0)
             layoutParams = params
-            setOnClickListener { dialogInstance?.dismiss() }
+            setOnClickListener {
+                vibrateClick()
+                dialogInstance?.dismiss()
+            }
         }
         rootLayout.addView(closeBtn)
 
@@ -573,6 +647,7 @@ class MainActivity : Activity() {
                         gravity = Gravity.CENTER_VERTICAL
                         setPadding(16, 22, 16, 22)
                         setOnClickListener {
+                            vibrateClick(true)
                             benchDialog?.dismiss()
                             applyDnsMode("hostname", server.host)
                             Toast.makeText(this@MainActivity, "Подключен лучший: ${server.name}", Toast.LENGTH_SHORT).show()
@@ -643,6 +718,7 @@ class MainActivity : Activity() {
             params.setMargins(0, 16, 0, 10)
             layoutParams = params
             setOnClickListener {
+                vibrateClick()
                 text = "⏳ Идет сканирование..."
                 for (s in serverList) s.ping = -2
                 populateBenchmarkList()
@@ -680,6 +756,7 @@ class MainActivity : Activity() {
                         text = "🔄 Запустить тест скорости"
                         populateBenchmarkList()
                         renderServerList()
+                        vibrateClick(true)
                         Toast.makeText(this@MainActivity, "✅ Тест скорости завершен!", Toast.LENGTH_SHORT).show()
                     }
                 }.start()
@@ -696,7 +773,10 @@ class MainActivity : Activity() {
             background = createRoundRect("#121418", 22f, "#1E222B")
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             layoutParams = params
-            setOnClickListener { benchDialog?.dismiss() }
+            setOnClickListener {
+                vibrateClick()
+                benchDialog?.dismiss()
+            }
         }
         rootLayout.addView(closeBtn)
 
@@ -759,6 +839,7 @@ class MainActivity : Activity() {
                 typeface = if (isSelected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
                 setPadding(20, 26, 20, 26)
                 setOnClickListener {
+                    vibrateClick(true)
                     themeDialog?.dismiss()
                     saveAndApplyTheme(item.first)
                 }
@@ -783,6 +864,7 @@ class MainActivity : Activity() {
             params.setMargins(0, 16, 0, 0)
             layoutParams = params
             setOnClickListener {
+                vibrateClick()
                 themeDialog?.dismiss()
                 showSettingsDialog()
             }
@@ -940,6 +1022,7 @@ class MainActivity : Activity() {
                 layoutParams = params
 
                 setOnClickListener {
+                    vibrateClick(true)
                     applyDnsMode("hostname", server.host)
                     Toast.makeText(this@MainActivity, "Подключен: ${server.name}", Toast.LENGTH_SHORT).show()
                 }
@@ -987,7 +1070,10 @@ class MainActivity : Activity() {
                 val params = LinearLayout.LayoutParams(88, 88)
                 params.setMargins(6, 0, 6, 0)
                 layoutParams = params
-                setOnClickListener { showEditServerDialog(index) }
+                setOnClickListener {
+                    vibrateClick()
+                    showEditServerDialog(index)
+                }
             }
 
             val delBtn = TextView(this).apply {
@@ -998,6 +1084,7 @@ class MainActivity : Activity() {
                 val params = LinearLayout.LayoutParams(88, 88)
                 layoutParams = params
                 setOnClickListener {
+                    vibrateClick(true)
                     serverList.removeAt(index)
                     saveServers()
                     renderServerList()
@@ -1096,6 +1183,7 @@ class MainActivity : Activity() {
             .setTitle(if (isEdit) "Редактировать сервер" else "Добавить новый сервер")
             .setView(layout)
             .setPositiveButton("Сохранить") { _, _ ->
+                vibrateClick()
                 val cleanHost = sanitizeHost(hostInput.text.toString())
                 val rawName = nameInput.text.toString().trim()
                 val cleanName = if (rawName.isEmpty()) cleanHost else rawName
@@ -1114,7 +1202,7 @@ class MainActivity : Activity() {
                 saveServers()
                 checkNetworkAndTestAll()
             }
-            .setNegativeButton("Отмена", null)
+            .setNegativeButton("Отмена") { _, _ -> vibrateClick() }
             .show()
     }
 
@@ -1162,6 +1250,7 @@ class MainActivity : Activity() {
                 orientation = LinearLayout.VERTICAL
                 setPadding(20, 22, 20, 22)
                 setOnClickListener {
+                    vibrateClick()
                     if (serverList.any { it.host.equals(chosen.host, ignoreCase = true) }) {
                         Toast.makeText(this@MainActivity, "Уже есть в вашем списке", Toast.LENGTH_SHORT).show()
                     } else {
@@ -1211,6 +1300,7 @@ class MainActivity : Activity() {
             params.setMargins(0, 16, 0, 10)
             layoutParams = params
             setOnClickListener {
+                vibrateClick(true)
                 var added = 0
                 for (p in popularCatalog) {
                     if (serverList.none { it.host.equals(p.host, ignoreCase = true) }) {
@@ -1235,7 +1325,10 @@ class MainActivity : Activity() {
             background = createRoundRect("#121418", 22f, "#1E222B")
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             layoutParams = params
-            setOnClickListener { dialogInstance?.dismiss() }
+            setOnClickListener {
+                vibrateClick()
+                dialogInstance?.dismiss()
+            }
         }
         rootLayout.addView(closeBtn)
 
@@ -1393,6 +1486,7 @@ class MainActivity : Activity() {
                 setTextColor(Color.WHITE)
                 setPadding(20, 26, 20, 26)
                 setOnClickListener {
+                    vibrateClick()
                     dialogInstance?.dismiss()
                     val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                     when (which) {
@@ -1441,7 +1535,10 @@ class MainActivity : Activity() {
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             params.setMargins(0, 16, 0, 0)
             layoutParams = params
-            setOnClickListener { dialogInstance?.dismiss() }
+            setOnClickListener {
+                vibrateClick()
+                dialogInstance?.dismiss()
+            }
         }
         rootLayout.addView(closeBtn)
 
@@ -1514,6 +1611,7 @@ class MainActivity : Activity() {
             params.setMargins(0, 0, 0, 12)
             layoutParams = params
             setOnClickListener {
+                vibrateClick(true)
                 dialogInstance?.dismiss()
                 requestShizukuOneClick()
             }
@@ -1532,6 +1630,7 @@ class MainActivity : Activity() {
             params.setMargins(0, 0, 0, 12)
             layoutParams = params
             setOnClickListener {
+                vibrateClick()
                 dialogInstance?.dismiss()
                 showShizukuGuideDialog()
             }
@@ -1549,6 +1648,7 @@ class MainActivity : Activity() {
             params.setMargins(0, 0, 0, 12)
             layoutParams = params
             setOnClickListener {
+                vibrateClick()
                 val cb = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 cb.setPrimaryClip(ClipData.newPlainText("adb", adbCommand))
                 Toast.makeText(this@MainActivity, "Команда скопирована", Toast.LENGTH_SHORT).show()
@@ -1565,7 +1665,10 @@ class MainActivity : Activity() {
             background = createRoundRect("#121418", 22f, "#1E222B")
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             layoutParams = params
-            setOnClickListener { dialogInstance?.dismiss() }
+            setOnClickListener {
+                vibrateClick()
+                dialogInstance?.dismiss()
+            }
         }
         rootLayout.addView(closeBtn)
 
@@ -1696,6 +1799,7 @@ class MainActivity : Activity() {
             params.setMargins(0, 0, 8, 0)
             layoutParams = params
             setOnClickListener {
+                vibrateClick()
                 try {
                     startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=moe.shizuku.privileged.api")))
                 } catch (_: Exception) {}
@@ -1713,6 +1817,7 @@ class MainActivity : Activity() {
             params.setMargins(8, 0, 0, 0)
             layoutParams = params
             setOnClickListener {
+                vibrateClick()
                 try {
                     startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/RikkaApps/Shizuku/releases")))
                 } catch (_: Exception) {}
@@ -1733,6 +1838,7 @@ class MainActivity : Activity() {
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
             layoutParams = params
             setOnClickListener {
+                vibrateClick()
                 guideDialog?.dismiss()
                 showAdbDialog()
             }
@@ -1791,6 +1897,8 @@ class DnsTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
+        HapticUtil.vibrate(this, true)
+
         if (checkSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS) != PackageManager.PERMISSION_GRANTED) {
             Toast.makeText(this, "Сначала выдайте разрешение в приложении", Toast.LENGTH_LONG).show()
             return
