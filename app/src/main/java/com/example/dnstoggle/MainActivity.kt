@@ -97,7 +97,6 @@ class MainActivity : Activity() {
     private lateinit var modeTitle: TextView
     private lateinit var titleApp: TextView
     private lateinit var pingBtn: Button
-    private lateinit var smartConnectBtn: Button
 
     // Элементы плашки возврата удаленного сервера (Undo)
     private lateinit var undoBanner: LinearLayout
@@ -220,8 +219,6 @@ class MainActivity : Activity() {
         titleApp.setTextColor(Color.parseColor(accentColorHex))
         pingBtn.background = createRoundRect(accentCardBgHex, 20f, accentColorHex)
         pingBtn.setTextColor(Color.parseColor(accentColorHex))
-        smartConnectBtn.background = createRoundRect(accentCardBgHex, 20f, accentColorHex)
-        smartConnectBtn.setTextColor(Color.parseColor(accentColorHex))
         undoBanner.background = createRoundRect("#181B22", 22f, accentColorHex)
         undoActionBtn.setTextColor(Color.parseColor(accentColorHex))
 
@@ -431,36 +428,20 @@ class MainActivity : Activity() {
 
         val listHeader = TextView(this).apply {
             text = "ДОСТУПНЫЕ СЕРВЕРЫ"
-            textSize = 11f
+            textSize = 12f
             setTextColor(Color.parseColor("#78909C"))
             typeface = Typeface.DEFAULT_BOLD
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
-        smartConnectBtn = Button(this).apply {
-            text = "⚡ Автовыбор"
-            textSize = 11f
-            setTextColor(Color.parseColor(accentColorHex))
-            isAllCaps = false
-            setPadding(20, 0, 20, 0)
-            background = createRoundRect(accentCardBgHex, 20f, accentColorHex)
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 86)
-            params.setMargins(0, 0, 12, 0)
-            layoutParams = params
-            setOnClickListener {
-                vibrateClick(true)
-                smartConnectBestServer()
-            }
-        }
-
         pingBtn = Button(this).apply {
-            text = "📡 Пинг (853)"
+            text = "📡 Проверка пинг (порт 853)"
             textSize = 11f
             setTextColor(Color.parseColor(accentColorHex))
             isAllCaps = false
-            setPadding(20, 0, 20, 0)
+            setPadding(22, 0, 22, 0)
             background = createRoundRect(accentCardBgHex, 20f, accentColorHex)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 86)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 88)
             setOnClickListener {
                 vibrateClick()
                 checkNetworkAndTestAll(false)
@@ -468,7 +449,6 @@ class MainActivity : Activity() {
         }
 
         headerRow.addView(listHeader)
-        headerRow.addView(smartConnectBtn)
         headerRow.addView(pingBtn)
         mainLayout.addView(headerRow)
 
@@ -525,17 +505,6 @@ class MainActivity : Activity() {
         setContentView(rootScroll)
     }
 
-    private fun smartConnectBestServer() {
-        val fastest = serverList.filter { it.ping > 0 }.minByOrNull { it.ping }
-        if (fastest != null) {
-            applyDnsMode("hostname", fastest.host)
-            Toast.makeText(this, "⚡ Подключен самый быстрый: ${fastest.name} (${fastest.ping} мс)", Toast.LENGTH_LONG).show()
-        } else {
-            Toast.makeText(this, "⏳ Замеряем скорость для выбора лучшего сервера...", Toast.LENGTH_SHORT).show()
-            checkNetworkAndTestAll(autoConnectBest = true)
-        }
-    }
-
     private fun verifyActiveDnsInternet() {
         netStatusText.text = "⏳ Проверка интернет-отклика и DNS-резолвинга..."
         Thread {
@@ -560,6 +529,138 @@ class MainActivity : Activity() {
                 }
             }
         }.start()
+    }
+
+    // Всплывающее окно при нажатии на 3 вертикальные точки (Редактировать / Удалить)
+    private fun showServerActionsDialog(index: Int) {
+        if (index !in serverList.indices) return
+        val server = serverList[index]
+        var actionDialog: AlertDialog? = null
+
+        val rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(36, 28, 36, 28)
+            background = createRoundRect("#0F1117", 36f, "#1E222B")
+        }
+
+        val headerBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            setPadding(24, 20, 24, 20)
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            params.setMargins(0, 0, 0, 18)
+            layoutParams = params
+        }
+
+        val titleView = TextView(this).apply {
+            text = server.name
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+
+        val subTitleView = TextView(this).apply {
+            text = server.host
+            textSize = 12f
+            setTextColor(Color.parseColor("#90A4AE"))
+            gravity = Gravity.CENTER
+            setPadding(0, 4, 0, 0)
+        }
+
+        headerBox.addView(titleView)
+        headerBox.addView(subTitleView)
+        rootLayout.addView(headerBox)
+
+        val editCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(28, 22, 28, 22)
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            params.setMargins(0, 0, 0, 12)
+            layoutParams = params
+            setOnClickListener {
+                vibrateClick()
+                actionDialog?.dismiss()
+                showEditServerDialog(index)
+            }
+        }
+
+        val editTitle = TextView(this).apply {
+            text = "✏️ Редактировать"
+            textSize = 15f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+        }
+
+        val editSub = TextView(this).apply {
+            text = "Изменить название или адрес хоста"
+            textSize = 12f
+            setTextColor(Color.parseColor("#90A4AE"))
+            setPadding(0, 4, 0, 0)
+        }
+
+        editCard.addView(editTitle)
+        editCard.addView(editSub)
+        rootLayout.addView(editCard)
+
+        val deleteCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(28, 22, 28, 22)
+            background = createRoundRect("#1F1214", 22f, "#FF5252")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            params.setMargins(0, 0, 0, 16)
+            layoutParams = params
+            setOnClickListener {
+                vibrateClick(true)
+                actionDialog?.dismiss()
+                showDeleteConfirmDialog(index)
+            }
+        }
+
+        val deleteTitle = TextView(this).apply {
+            text = "🗑️ Удалить"
+            textSize = 15f
+            setTextColor(Color.parseColor("#FF5252"))
+            typeface = Typeface.DEFAULT_BOLD
+        }
+
+        val deleteSub = TextView(this).apply {
+            text = "Удалить сервер из вашего списка"
+            textSize = 12f
+            setTextColor(Color.parseColor("#E57373"))
+            setPadding(0, 4, 0, 0)
+        }
+
+        deleteCard.addView(deleteTitle)
+        deleteCard.addView(deleteSub)
+        rootLayout.addView(deleteCard)
+
+        val closeBtn = TextView(this).apply {
+            text = "Отмена"
+            textSize = 15f
+            setTextColor(Color.parseColor(accentColorHex))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            layoutParams = params
+            setOnClickListener {
+                vibrateClick()
+                actionDialog?.dismiss()
+            }
+        }
+        rootLayout.addView(closeBtn)
+
+        actionDialog = AlertDialog.Builder(this)
+            .setView(rootLayout)
+            .create()
+
+        actionDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        actionDialog?.show()
     }
 
     private fun showDeleteConfirmDialog(index: Int) {
@@ -693,38 +794,26 @@ class MainActivity : Activity() {
         headerBox.addView(titleView)
         rootLayout.addView(headerBox)
 
-        val scrollView = ScrollView(this).apply {
-            val maxHeight = (resources.displayMetrics.heightPixels * 0.62).toInt()
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxHeight)
-        }
-
         val optionsContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
-
-        val isHapticOn = prefs.getBoolean("haptic_enabled", true)
-        val isSimpleToggle = prefs.getBoolean("tile_simple_toggle", true)
-        val isAutoSortOn = prefs.getBoolean("auto_sort_ping", true)
 
         val options = listOf(
             Pair("➕ Добавить свой сервер", "Ручной ввод хоста и имени"),
             Pair("📚 Популярные DNS-серверы", "Каталог проверенных серверов"),
             Pair("📊 Ping Benchmark (Топ серверов)", "Анализ скорости и автовыбор лидера"),
             Pair("💾 Бэкап и сброс настроек", "Экспорт/импорт JSON, сброс списка"),
-            Pair("🎨 Выбор темы оформления", "Сменить неоновый стиль интерфейса"),
-            Pair("🔀 Автосортировка по пингу", if (isAutoSortOn) "Сейчас: Включена (быстрые сверху)" else "Сейчас: Отключена (фиксированный порядок)"),
-            Pair("🎛️ Режим шторки", if (isSimpleToggle) "Сейчас: Обычный тумблер (Вкл/Выкл)" else "Сейчас: Циклический перебор"),
-            Pair("📳 Виброотклик при нажатиях", if (isHapticOn) "Сейчас: Включен" else "Сейчас: Отключен")
+            Pair("✨ Кастомизация", "Тема, автосортировка, шторка и виброотклик")
         )
 
         for ((index, item) in options.withIndex()) {
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(28, 20, 28, 20)
+                setPadding(28, 22, 28, 22)
                 background = createRoundRect("#121418", 22f, "#1E222B")
                 val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                params.setMargins(0, 0, 0, 12)
+                params.setMargins(0, 0, 0, 14)
                 layoutParams = params
 
                 setOnClickListener {
@@ -735,33 +824,7 @@ class MainActivity : Activity() {
                         1 -> showPresetsDialog()
                         2 -> showBenchmarkDialog()
                         3 -> showBackupDialog()
-                        4 -> showThemeChooserDialog()
-                        5 -> {
-                            val newSort = !isAutoSortOn
-                            prefs.edit().putBoolean("auto_sort_ping", newSort).apply()
-                            if (newSort) {
-                                serverList.sortWith(Comparator { a, b ->
-                                    val pA = if (a.ping > 0) a.ping else Int.MAX_VALUE
-                                    val pB = if (b.ping > 0) b.ping else Int.MAX_VALUE
-                                    pA.compareTo(pB)
-                                })
-                                saveServers()
-                                renderServerList()
-                            }
-                            val msg = if (newSort) "Автосортировка по скорости включена 🔀" else "Порядок серверов зафиксирован 📌"
-                            Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
-                        }
-                        6 -> {
-                            prefs.edit().putBoolean("tile_simple_toggle", !isSimpleToggle).apply()
-                            Toast.makeText(this@MainActivity, "Режим шторки изменен", Toast.LENGTH_SHORT).show()
-                        }
-                        7 -> {
-                            val newState = !isHapticOn
-                            prefs.edit().putBoolean("haptic_enabled", newState).apply()
-                            if (newState) HapticUtil.vibrate(this@MainActivity, true)
-                            val msg = if (newState) "Виброотклик включен 📳" else "Виброотклик отключен 🔇"
-                            Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
-                        }
+                        4 -> showCustomizationDialog()
                     }
                 }
             }
@@ -785,8 +848,7 @@ class MainActivity : Activity() {
             optionsContainer.addView(card)
         }
 
-        scrollView.addView(optionsContainer)
-        rootLayout.addView(scrollView)
+        rootLayout.addView(optionsContainer)
 
         val closeBtn = TextView(this).apply {
             text = "Закрыть"
@@ -796,7 +858,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             background = createRoundRect("#121418", 22f, "#1E222B")
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
-            params.setMargins(0, 12, 0, 0)
+            params.setMargins(0, 10, 0, 0)
             layoutParams = params
             setOnClickListener {
                 vibrateClick()
@@ -811,6 +873,151 @@ class MainActivity : Activity() {
 
         dialogInstance?.window?.setBackgroundDrawableResource(android.R.color.transparent)
         dialogInstance?.show()
+    }
+
+    // Отдельное окно «Кастомизация» с 4 вкладками
+    private fun showCustomizationDialog() {
+        var customDialog: AlertDialog? = null
+
+        val rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(36, 28, 36, 28)
+            background = createRoundRect("#0F1117", 36f, "#1E222B")
+        }
+
+        val headerBox = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 115)
+            params.setMargins(0, 0, 0, 20)
+            layoutParams = params
+        }
+
+        val titleView = TextView(this).apply {
+            text = "✨ Кастомизация"
+            textSize = 17f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+        headerBox.addView(titleView)
+        rootLayout.addView(headerBox)
+
+        val optionsContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        fun renderCustomizationOptions() {
+            optionsContainer.removeAllViews()
+            val isHapticOn = prefs.getBoolean("haptic_enabled", true)
+            val isSimpleToggle = prefs.getBoolean("tile_simple_toggle", true)
+            val isAutoSortOn = prefs.getBoolean("auto_sort_ping", true)
+
+            val customOptions = listOf(
+                Pair("🎨 Выбор темы оформления", "Сменить неоновый стиль интерфейса"),
+                Pair("🔀 Автосортировка по пингу", if (isAutoSortOn) "Сейчас: Включена (быстрые сверху)" else "Сейчас: Отключена (фиксированный порядок)"),
+                Pair("🎛️ Режим шторки", if (isSimpleToggle) "Сейчас: Обычный тумблер (Вкл/Выкл)" else "Сейчас: Циклический перебор"),
+                Pair("📳 Виброотклик при нажатиях", if (isHapticOn) "Сейчас: Включен" else "Сейчас: Отключен")
+            )
+
+            for ((index, item) in customOptions.withIndex()) {
+                val card = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(28, 22, 28, 22)
+                    background = createRoundRect("#121418", 22f, "#1E222B")
+                    val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    params.setMargins(0, 0, 0, 14)
+                    layoutParams = params
+
+                    setOnClickListener {
+                        vibrateClick()
+                        when (index) {
+                            0 -> {
+                                customDialog?.dismiss()
+                                showThemeChooserDialog()
+                            }
+                            1 -> {
+                                val newSort = !isAutoSortOn
+                                prefs.edit().putBoolean("auto_sort_ping", newSort).apply()
+                                if (newSort) {
+                                    serverList.sortWith(Comparator { a, b ->
+                                        val pA = if (a.ping > 0) a.ping else Int.MAX_VALUE
+                                        val pB = if (b.ping > 0) b.ping else Int.MAX_VALUE
+                                        pA.compareTo(pB)
+                                    })
+                                    saveServers()
+                                    renderServerList()
+                                }
+                                renderCustomizationOptions()
+                                val msg = if (newSort) "Автосортировка включена 🔀" else "Порядок серверов зафиксирован 📌"
+                                Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
+                            }
+                            2 -> {
+                                prefs.edit().putBoolean("tile_simple_toggle", !isSimpleToggle).apply()
+                                renderCustomizationOptions()
+                                Toast.makeText(this@MainActivity, "Режим шторки изменен", Toast.LENGTH_SHORT).show()
+                            }
+                            3 -> {
+                                val newState = !isHapticOn
+                                prefs.edit().putBoolean("haptic_enabled", newState).apply()
+                                if (newState) HapticUtil.vibrate(this@MainActivity, true)
+                                renderCustomizationOptions()
+                                val msg = if (newState) "Виброотклик включен 📳" else "Виброотклик отключен 🔇"
+                                Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                }
+
+                val titleTv = TextView(this).apply {
+                    text = item.first
+                    textSize = 15f
+                    setTextColor(Color.WHITE)
+                    typeface = Typeface.DEFAULT_BOLD
+                }
+
+                val subTv = TextView(this).apply {
+                    text = item.second
+                    textSize = 12f
+                    setTextColor(Color.parseColor("#90A4AE"))
+                    setPadding(0, 4, 0, 0)
+                }
+
+                card.addView(titleTv)
+                card.addView(subTv)
+                optionsContainer.addView(card)
+            }
+        }
+
+        renderCustomizationOptions()
+        rootLayout.addView(optionsContainer)
+
+        val backBtn = TextView(this).apply {
+            text = "Назад к настройкам"
+            textSize = 15f
+            setTextColor(Color.parseColor(accentColorHex))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
+            params.setMargins(0, 10, 0, 0)
+            layoutParams = params
+            setOnClickListener {
+                vibrateClick()
+                customDialog?.dismiss()
+                showSettingsDialog()
+            }
+        }
+        rootLayout.addView(backBtn)
+
+        customDialog = AlertDialog.Builder(this)
+            .setView(rootLayout)
+            .create()
+
+        customDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        customDialog?.show()
     }
 
     private fun showBenchmarkDialog() {
@@ -951,7 +1158,7 @@ class MainActivity : Activity() {
         rootLayout.addView(scrollView)
 
         val connectBestBtn = TextView(this).apply {
-            text = "⚡ Подключить самый быстрый (#1)"
+            text = "⚡ Автовыбор (Подключить лучший #1)"
             textSize = 14f
             setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
@@ -968,7 +1175,9 @@ class MainActivity : Activity() {
                     applyDnsMode("hostname", best.host)
                     Toast.makeText(this@MainActivity, "⚡ Подключен лидер: ${best.name} (${best.ping} мс)", Toast.LENGTH_LONG).show()
                 } else {
-                    Toast.makeText(this@MainActivity, "Сначала дождитесь завершения теста скорости", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "⏳ Запускаем экспресс-тест для выбора лидера...", Toast.LENGTH_SHORT).show()
+                    benchDialog?.dismiss()
+                    checkNetworkAndTestAll(autoConnectBest = true)
                 }
             }
         }
@@ -1123,7 +1332,7 @@ class MainActivity : Activity() {
         rootLayout.addView(listBox)
 
         val backBtn = TextView(this).apply {
-            text = "Назад к настройкам"
+            text = "Назад к кастомизации"
             textSize = 15f
             setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
@@ -1135,7 +1344,7 @@ class MainActivity : Activity() {
             setOnClickListener {
                 vibrateClick()
                 themeDialog?.dismiss()
-                showSettingsDialog()
+                showCustomizationDialog()
             }
         }
         rootLayout.addView(backBtn)
@@ -1341,34 +1550,24 @@ class MainActivity : Activity() {
             infoLayout.addView(subTv)
             card.addView(infoLayout)
 
-            val editBtn = TextView(this).apply {
-                text = "✏️"
-                textSize = 15f
+            // Три вертикальные точки вместо двух отдельных кнопок
+            val moreBtn = TextView(this).apply {
+                text = "⋮"
+                textSize = 22f
+                setTextColor(Color.parseColor("#90A4AE"))
+                typeface = Typeface.DEFAULT_BOLD
                 gravity = Gravity.CENTER
+                background = createRoundRect("#181B22", 18f, "#262B36")
                 val params = LinearLayout.LayoutParams(88, 88)
-                params.setMargins(6, 0, 6, 0)
+                params.setMargins(12, 0, 4, 0)
                 layoutParams = params
                 setOnClickListener {
                     vibrateClick()
-                    showEditServerDialog(index)
+                    showServerActionsDialog(index)
                 }
             }
 
-            val delBtn = TextView(this).apply {
-                text = "✖️"
-                textSize = 14f
-                setTextColor(Color.parseColor("#FF5252"))
-                gravity = Gravity.CENTER
-                val params = LinearLayout.LayoutParams(88, 88)
-                layoutParams = params
-                setOnClickListener {
-                    vibrateClick()
-                    showDeleteConfirmDialog(index)
-                }
-            }
-
-            card.addView(editBtn)
-            card.addView(delBtn)
+            card.addView(moreBtn)
             listContainer.addView(card)
         }
     }
