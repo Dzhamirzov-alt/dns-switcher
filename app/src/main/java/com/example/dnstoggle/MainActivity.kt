@@ -856,7 +856,6 @@ class MainActivity : Activity() {
         dialogInstance?.show()
     }
 
-    // Отдельное окно «Кастомизация» с возвратом в настройки по кнопке «Назад»
     private fun showCustomizationDialog() {
         var customDialog: AlertDialog? = null
 
@@ -1245,7 +1244,7 @@ class MainActivity : Activity() {
 
         for ((index, item) in themes.withIndex()) {
             val isSelected = (currentThemeKey == item.first)
-            val prefix = if (isSelected) "◆ " else "◇ "
+            val prefix = if (isSelected) "🛡️ " else "🛡️ "
 
             val themeTv = TextView(this).apply {
                 text = "$prefix${item.second}"
@@ -1456,17 +1455,17 @@ class MainActivity : Activity() {
                 }
             }
 
-            // Киберпанк-индикатор статуса вместо стандартного белого кружка
+            // Щит в качестве индикатора статуса, строго по центру карточки
             val statusBadge = TextView(this).apply {
-                text = if (isSelected) "◆" else "◇"
-                textSize = 20f
+                text = "🛡️"
+                textSize = 18f
                 setTextColor(
                     if (isSelected) Color.parseColor(accentColorHex)
                     else Color.parseColor("#455A64")
                 )
                 gravity = Gravity.CENTER
-                val params = LinearLayout.LayoutParams(56, 56)
-                params.setMargins(0, 0, 18, 0)
+                val params = LinearLayout.LayoutParams(64, ViewGroup.LayoutParams.WRAP_CONTENT)
+                params.setMargins(0, 0, 12, 0)
                 layoutParams = params
             }
             card.addView(statusBadge)
