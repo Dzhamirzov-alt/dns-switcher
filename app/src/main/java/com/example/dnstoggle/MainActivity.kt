@@ -531,6 +531,18 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    // Чистый заголовок диалогового окна без рамки
+    private fun createDialogHeaderTitle(titleText: String): TextView {
+        return TextView(this).apply {
+            text = titleText
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(12, 6, 12, 24)
+        }
+    }
+
     // Всплывающее окно при нажатии на 3 вертикальные точки (Редактировать / Удалить)
     private fun showServerActionsDialog(index: Int) {
         if (index !in serverList.indices) return
@@ -543,35 +555,25 @@ class MainActivity : Activity() {
             background = createRoundRect("#0F1117", 36f, "#1E222B")
         }
 
-        val headerBox = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
-            setPadding(24, 20, 24, 20)
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            params.setMargins(0, 0, 0, 18)
-            layoutParams = params
-        }
-
         val titleView = TextView(this).apply {
             text = server.name
-            textSize = 16f
+            textSize = 18f
             setTextColor(Color.WHITE)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
+            setPadding(12, 4, 12, 4)
         }
 
         val subTitleView = TextView(this).apply {
             text = server.host
-            textSize = 12f
-            setTextColor(Color.parseColor("#90A4AE"))
+            textSize = 13f
+            setTextColor(Color.parseColor(accentColorHex))
             gravity = Gravity.CENTER
-            setPadding(0, 4, 0, 0)
+            setPadding(12, 0, 12, 22)
         }
 
-        headerBox.addView(titleView)
-        headerBox.addView(subTitleView)
-        rootLayout.addView(headerBox)
+        rootLayout.addView(titleView)
+        rootLayout.addView(subTitleView)
 
         val editCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -584,7 +586,7 @@ class MainActivity : Activity() {
             setOnClickListener {
                 vibrateClick()
                 actionDialog?.dismiss()
-                showEditServerDialog(index)
+                showEditServerDialog(index, returnToActions = true)
             }
         }
 
@@ -674,15 +676,7 @@ class MainActivity : Activity() {
             background = createRoundRect("#0F1117", 36f, "#FF5252")
         }
 
-        val titleView = TextView(this).apply {
-            text = "🗑️ Удаление сервера"
-            textSize = 17f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(0, 8, 0, 16)
-        }
-        rootLayout.addView(titleView)
+        rootLayout.addView(createDialogHeaderTitle("🗑️ Удаление сервера"))
 
         val msgView = TextView(this).apply {
             text = "Удалить «${server.name}» (${server.host}) из вашего списка?"
@@ -699,7 +693,7 @@ class MainActivity : Activity() {
         }
 
         val cancelBtn = TextView(this).apply {
-            text = "Отмена"
+            text = "Назад"
             textSize = 14f
             setTextColor(Color.WHITE)
             typeface = Typeface.DEFAULT_BOLD
@@ -711,6 +705,7 @@ class MainActivity : Activity() {
             setOnClickListener {
                 vibrateClick()
                 confirmDialog?.dismiss()
+                showServerActionsDialog(index)
             }
         }
 
@@ -737,6 +732,9 @@ class MainActivity : Activity() {
 
         confirmDialog = AlertDialog.Builder(this)
             .setView(rootLayout)
+            .setOnCancelListener {
+                showServerActionsDialog(index)
+            }
             .create()
 
         confirmDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
@@ -775,24 +773,7 @@ class MainActivity : Activity() {
             background = createRoundRect("#0F1117", 36f, "#1E222B")
         }
 
-        val headerBox = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 115)
-            params.setMargins(0, 0, 0, 20)
-            layoutParams = params
-        }
-
-        val titleView = TextView(this).apply {
-            text = "⚙️ Настройки приложения"
-            textSize = 17f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-        }
-        headerBox.addView(titleView)
-        rootLayout.addView(headerBox)
+        rootLayout.addView(createDialogHeaderTitle("⚙️ Настройки приложения"))
 
         val optionsContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -820,7 +801,7 @@ class MainActivity : Activity() {
                     vibrateClick()
                     dialogInstance?.dismiss()
                     when (index) {
-                        0 -> showEditServerDialog(null)
+                        0 -> showEditServerDialog(null, returnToSettings = true)
                         1 -> showPresetsDialog()
                         2 -> showBenchmarkDialog()
                         3 -> showBackupDialog()
@@ -875,7 +856,7 @@ class MainActivity : Activity() {
         dialogInstance?.show()
     }
 
-    // Отдельное окно «Кастомизация» с 4 вкладками
+    // Отдельное окно «Кастомизация» с возвратом в настройки по кнопке «Назад»
     private fun showCustomizationDialog() {
         var customDialog: AlertDialog? = null
 
@@ -885,24 +866,7 @@ class MainActivity : Activity() {
             background = createRoundRect("#0F1117", 36f, "#1E222B")
         }
 
-        val headerBox = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 115)
-            params.setMargins(0, 0, 0, 20)
-            layoutParams = params
-        }
-
-        val titleView = TextView(this).apply {
-            text = "✨ Кастомизация"
-            textSize = 17f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-        }
-        headerBox.addView(titleView)
-        rootLayout.addView(headerBox)
+        rootLayout.addView(createDialogHeaderTitle("✨ Кастомизация"))
 
         val optionsContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1014,6 +978,9 @@ class MainActivity : Activity() {
 
         customDialog = AlertDialog.Builder(this)
             .setView(rootLayout)
+            .setOnCancelListener {
+                showSettingsDialog()
+            }
             .create()
 
         customDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
@@ -1029,24 +996,7 @@ class MainActivity : Activity() {
             background = createRoundRect("#0F1117", 36f, "#1E222B")
         }
 
-        val headerBox = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
-            params.setMargins(0, 0, 0, 16)
-            layoutParams = params
-        }
-
-        val titleView = TextView(this).apply {
-            text = "📊 Ping Benchmark — Топ серверов"
-            textSize = 15f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-        }
-        headerBox.addView(titleView)
-        rootLayout.addView(headerBox)
+        rootLayout.addView(createDialogHeaderTitle("📊 Ping Benchmark — Топ серверов"))
 
         val scrollView = ScrollView(this).apply {
             val maxHeight = (resources.displayMetrics.heightPixels * 0.46).toInt()
@@ -1242,8 +1192,8 @@ class MainActivity : Activity() {
         }
         rootLayout.addView(runTestBtn)
 
-        val closeBtn = TextView(this).apply {
-            text = "Закрыть"
+        val backBtn = TextView(this).apply {
+            text = "Назад к настройкам"
             textSize = 15f
             setTextColor(Color.parseColor("#90A4AE"))
             typeface = Typeface.DEFAULT_BOLD
@@ -1254,12 +1204,16 @@ class MainActivity : Activity() {
             setOnClickListener {
                 vibrateClick()
                 benchDialog?.dismiss()
+                showSettingsDialog()
             }
         }
-        rootLayout.addView(closeBtn)
+        rootLayout.addView(backBtn)
 
         benchDialog = AlertDialog.Builder(this)
             .setView(rootLayout)
+            .setOnCancelListener {
+                showSettingsDialog()
+            }
             .create()
 
         benchDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
@@ -1275,24 +1229,7 @@ class MainActivity : Activity() {
             background = createRoundRect("#0F1117", 36f, "#1E222B")
         }
 
-        val headerBox = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
-            params.setMargins(0, 0, 0, 16)
-            layoutParams = params
-        }
-
-        val titleView = TextView(this).apply {
-            text = "🎨 Выбор темы оформления"
-            textSize = 16f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-        }
-        headerBox.addView(titleView)
-        rootLayout.addView(headerBox)
+        rootLayout.addView(createDialogHeaderTitle("🎨 Выбор темы оформления"))
 
         val listBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1308,7 +1245,7 @@ class MainActivity : Activity() {
 
         for ((index, item) in themes.withIndex()) {
             val isSelected = (currentThemeKey == item.first)
-            val prefix = if (isSelected) "➔ " else ""
+            val prefix = if (isSelected) "◆ " else "◇ "
 
             val themeTv = TextView(this).apply {
                 text = "$prefix${item.second}"
@@ -1320,6 +1257,7 @@ class MainActivity : Activity() {
                     vibrateClick(true)
                     themeDialog?.dismiss()
                     saveAndApplyTheme(item.first)
+                    showCustomizationDialog()
                 }
             }
             listBox.addView(themeTv)
@@ -1351,6 +1289,9 @@ class MainActivity : Activity() {
 
         themeDialog = AlertDialog.Builder(this)
             .setView(rootLayout)
+            .setOnCancelListener {
+                showCustomizationDialog()
+            }
             .create()
 
         themeDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
@@ -1489,7 +1430,7 @@ class MainActivity : Activity() {
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(32, 26, 20, 26)
+                setPadding(28, 24, 20, 24)
                 background = if (isSelected) {
                     createRoundRect(accentCardBgHex, 26f, accentColorHex)
                 } else {
@@ -1515,20 +1456,54 @@ class MainActivity : Activity() {
                 }
             }
 
+            // Киберпанк-индикатор статуса вместо стандартного белого кружка
+            val statusBadge = TextView(this).apply {
+                text = if (isSelected) "◆" else "◇"
+                textSize = 20f
+                setTextColor(
+                    if (isSelected) Color.parseColor(accentColorHex)
+                    else Color.parseColor("#455A64")
+                )
+                gravity = Gravity.CENTER
+                val params = LinearLayout.LayoutParams(56, 56)
+                params.setMargins(0, 0, 18, 0)
+                layoutParams = params
+            }
+            card.addView(statusBadge)
+
             val infoLayout = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
 
-            val indicator = if (isSelected) "🟢" else "⚪"
+            val nameRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+
             val nameTv = TextView(this).apply {
-                text = "$indicator ${server.name}"
+                text = server.name
                 textSize = 16f
                 setTextColor(Color.WHITE)
                 typeface = Typeface.DEFAULT_BOLD
             }
+            nameRow.addView(nameTv)
 
-            val statusSuffix = if (isSelected) " (Активен)" else ""
+            if (isSelected) {
+                val onlineTag = TextView(this).apply {
+                    text = "ONLINE"
+                    textSize = 9f
+                    setTextColor(Color.parseColor(accentColorHex))
+                    typeface = Typeface.DEFAULT_BOLD
+                    setPadding(14, 4, 14, 4)
+                    background = createRoundRect("#08080A", 12f, accentColorHex)
+                    val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    params.setMargins(16, 0, 0, 0)
+                    layoutParams = params
+                }
+                nameRow.addView(onlineTag)
+            }
+
             val pingPart = when (server.ping) {
                 -1 -> ""
                 -2 -> " • ⏳..."
@@ -1537,7 +1512,7 @@ class MainActivity : Activity() {
             }
 
             val subTv = TextView(this).apply {
-                text = "${server.host}$statusSuffix$pingPart"
+                text = "${server.host}$pingPart"
                 textSize = 13f
                 setTextColor(
                     if (server.ping == -3) Color.parseColor("#FF5252")
@@ -1546,11 +1521,11 @@ class MainActivity : Activity() {
                 setPadding(0, 6, 0, 0)
             }
 
-            infoLayout.addView(nameTv)
+            infoLayout.addView(nameRow)
             infoLayout.addView(subTv)
             card.addView(infoLayout)
 
-            // Три вертикальные точки вместо двух отдельных кнопок
+            // Три вертикальные точки для вызова меню карточки
             val moreBtn = TextView(this).apply {
                 text = "⋮"
                 textSize = 22f
@@ -1644,50 +1619,79 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun showEditServerDialog(editIndex: Int?) {
+    private fun showEditServerDialog(
+        editIndex: Int?,
+        returnToSettings: Boolean = false,
+        returnToActions: Boolean = false
+    ) {
         val idx = editIndex ?: -1
         val isEdit = idx >= 0
         val current = if (isEdit) serverList[idx] else null
+        var editDialog: AlertDialog? = null
 
-        val layout = LinearLayout(this).apply {
+        val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(50, 40, 50, 20)
+            setPadding(36, 28, 36, 28)
+            background = createRoundRect("#0F1117", 36f, "#1E222B")
         }
+
+        rootLayout.addView(createDialogHeaderTitle(if (isEdit) "✏️ Редактировать сервер" else "➕ Добавить свой сервер"))
 
         val nameInput = EditText(this).apply {
             hint = "Название (например, Comss.one)"
             setText(current?.name ?: "")
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.parseColor("#546E7A"))
+            setPadding(28, 24, 28, 24)
+            background = createRoundRect("#121418", 20f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            params.setMargins(0, 0, 0, 14)
+            layoutParams = params
         }
 
         val hostInput = EditText(this).apply {
             hint = "Адрес хоста (например, dns.comss.one)"
             inputType = InputType.TYPE_TEXT_VARIATION_URI
             setText(current?.host ?: "")
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.parseColor("#546E7A"))
+            setPadding(28, 24, 28, 24)
+            background = createRoundRect("#121418", 20f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            params.setMargins(0, 0, 0, 12)
+            layoutParams = params
         }
 
         val noteTv = TextView(this).apply {
             text = "💡 Префиксы https:// или tls:// очищаются автоматически."
             textSize = 12f
-            setTextColor(Color.GRAY)
-            setPadding(0, 15, 0, 0)
+            setTextColor(Color.parseColor("#90A4AE"))
+            setPadding(8, 4, 8, 20)
         }
 
-        layout.addView(nameInput)
-        layout.addView(hostInput)
-        layout.addView(noteTv)
+        rootLayout.addView(nameInput)
+        rootLayout.addView(hostInput)
+        rootLayout.addView(noteTv)
 
-        AlertDialog.Builder(this)
-            .setTitle(if (isEdit) "Редактировать сервер" else "Добавить новый сервер")
-            .setView(layout)
-            .setPositiveButton("Сохранить") { _, _ ->
-                vibrateClick()
+        val saveBtn = TextView(this).apply {
+            text = "Сохранить"
+            textSize = 15f
+            setTextColor(Color.parseColor(accentColorHex))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect(accentCardBgHex, 22f, accentColorHex)
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            params.setMargins(0, 0, 0, 10)
+            layoutParams = params
+            setOnClickListener {
+                vibrateClick(true)
                 val cleanHost = sanitizeHost(hostInput.text.toString())
                 val rawName = nameInput.text.toString().trim()
                 val cleanName = if (rawName.isEmpty()) cleanHost else rawName
 
                 if (cleanHost.isEmpty()) {
-                    Toast.makeText(this, "Введите адрес сервера", Toast.LENGTH_SHORT).show()
-                    return@setPositiveButton
+                    Toast.makeText(this@MainActivity, "Введите адрес сервера", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
                 }
 
                 if (isEdit) {
@@ -1697,10 +1701,41 @@ class MainActivity : Activity() {
                     serverList.add(DnsServer(cleanName, cleanHost))
                 }
                 saveServers()
+                editDialog?.dismiss()
                 checkNetworkAndTestAll()
             }
-            .setNegativeButton("Отмена") { _, _ -> vibrateClick() }
-            .show()
+        }
+
+        val cancelBtn = TextView(this).apply {
+            text = "Назад"
+            textSize = 15f
+            setTextColor(Color.parseColor("#90A4AE"))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect("#121418", 22f, "#1E222B")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            layoutParams = params
+            setOnClickListener {
+                vibrateClick()
+                editDialog?.dismiss()
+                if (returnToSettings) showSettingsDialog()
+                else if (returnToActions && idx >= 0) showServerActionsDialog(idx)
+            }
+        }
+
+        rootLayout.addView(saveBtn)
+        rootLayout.addView(cancelBtn)
+
+        editDialog = AlertDialog.Builder(this)
+            .setView(rootLayout)
+            .setOnCancelListener {
+                if (returnToSettings) showSettingsDialog()
+                else if (returnToActions && idx >= 0) showServerActionsDialog(idx)
+            }
+            .create()
+
+        editDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        editDialog?.show()
     }
 
     private fun showPresetsDialog() {
@@ -1712,24 +1747,7 @@ class MainActivity : Activity() {
             background = createRoundRect("#0F1117", 36f, "#1E222B")
         }
 
-        val headerBox = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
-            params.setMargins(0, 0, 0, 16)
-            layoutParams = params
-        }
-
-        val titleView = TextView(this).apply {
-            text = "📚 Популярные DNS-серверы"
-            textSize = 16f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-        }
-        headerBox.addView(titleView)
-        rootLayout.addView(headerBox)
+        rootLayout.addView(createDialogHeaderTitle("📚 Популярные DNS-серверы"))
 
         val scrollView = ScrollView(this).apply {
             val maxHeight = (resources.displayMetrics.heightPixels * 0.50).toInt()
@@ -1813,10 +1831,10 @@ class MainActivity : Activity() {
         }
         rootLayout.addView(addAllBtn)
 
-        val closeBtn = TextView(this).apply {
-            text = "Закрыть"
+        val backBtn = TextView(this).apply {
+            text = "Назад к настройкам"
             textSize = 15f
-            setTextColor(Color.parseColor(accentColorHex))
+            setTextColor(Color.parseColor("#90A4AE"))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             background = createRoundRect("#121418", 22f, "#1E222B")
@@ -1825,12 +1843,16 @@ class MainActivity : Activity() {
             setOnClickListener {
                 vibrateClick()
                 dialogInstance?.dismiss()
+                showSettingsDialog()
             }
         }
-        rootLayout.addView(closeBtn)
+        rootLayout.addView(backBtn)
 
         dialogInstance = AlertDialog.Builder(this)
             .setView(rootLayout)
+            .setOnCancelListener {
+                showSettingsDialog()
+            }
             .create()
 
         dialogInstance?.window?.setBackgroundDrawableResource(android.R.color.transparent)
@@ -1943,24 +1965,7 @@ class MainActivity : Activity() {
             background = createRoundRect("#0F1117", 36f, "#1E222B")
         }
 
-        val headerBox = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
-            params.setMargins(0, 0, 0, 16)
-            layoutParams = params
-        }
-
-        val titleView = TextView(this).apply {
-            text = "💾 Бэкап и восстановление"
-            textSize = 16f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-        }
-        headerBox.addView(titleView)
-        rootLayout.addView(headerBox)
+        rootLayout.addView(createDialogHeaderTitle("💾 Бэкап и восстановление"))
 
         val listBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2022,8 +2027,8 @@ class MainActivity : Activity() {
 
         rootLayout.addView(listBox)
 
-        val closeBtn = TextView(this).apply {
-            text = "Отмена"
+        val backBtn = TextView(this).apply {
+            text = "Назад к настройкам"
             textSize = 15f
             setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
@@ -2035,12 +2040,16 @@ class MainActivity : Activity() {
             setOnClickListener {
                 vibrateClick()
                 dialogInstance?.dismiss()
+                showSettingsDialog()
             }
         }
-        rootLayout.addView(closeBtn)
+        rootLayout.addView(backBtn)
 
         dialogInstance = AlertDialog.Builder(this)
             .setView(rootLayout)
+            .setOnCancelListener {
+                showSettingsDialog()
+            }
             .create()
 
         dialogInstance?.window?.setBackgroundDrawableResource(android.R.color.transparent)
@@ -2059,24 +2068,7 @@ class MainActivity : Activity() {
             background = createRoundRect("#0F1117", 36f, "#1E222B")
         }
 
-        val headerBox = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
-            params.setMargins(0, 0, 0, 16)
-            layoutParams = params
-        }
-
-        val titleView = TextView(this).apply {
-            text = "🔑 Системное разрешение"
-            textSize = 17f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-        }
-        headerBox.addView(titleView)
-        rootLayout.addView(headerBox)
+        rootLayout.addView(createDialogHeaderTitle("🔑 Системное разрешение"))
 
         val infoBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2186,24 +2178,7 @@ class MainActivity : Activity() {
             background = createRoundRect("#0F1117", 36f, "#1E222B")
         }
 
-        val headerBox = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            background = createRoundRect("#121418", 22f, "#1E222B")
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110)
-            params.setMargins(0, 0, 0, 16)
-            layoutParams = params
-        }
-
-        val titleView = TextView(this).apply {
-            text = "📖 Инструкция по Shizuku"
-            textSize = 16f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-        }
-        headerBox.addView(titleView)
-        rootLayout.addView(headerBox)
+        rootLayout.addView(createDialogHeaderTitle("📖 Инструкция по Shizuku"))
 
         val scrollView = ScrollView(this).apply {
             val maxHeight = (resources.displayMetrics.heightPixels * 0.55).toInt()
@@ -2344,6 +2319,9 @@ class MainActivity : Activity() {
 
         guideDialog = AlertDialog.Builder(this)
             .setView(rootLayout)
+            .setOnCancelListener {
+                showAdbDialog()
+            }
             .create()
 
         guideDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
