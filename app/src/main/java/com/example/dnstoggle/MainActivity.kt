@@ -9,9 +9,15 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Typeface
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.ShapeDrawable
+import android.graphics.drawable.shapes.Shape
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -31,6 +37,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
@@ -80,6 +87,36 @@ object HapticUtil {
             }
         } catch (_: Exception) {}
     }
+}
+
+// Кастомный векторный отрисовщик щита, подстраивающийся под цвет темы
+class ShieldDrawable(private var shieldColor: Int, private var isFilled: Boolean) : Drawable() {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = if (isFilled) Paint.Style.FILL else Paint.Style.STROKE
+        strokeWidth = 3.5f
+        color = shieldColor
+    }
+
+    override fun draw(canvas: Canvas) {
+        val width = bounds.width().toFloat()
+        val height = bounds.height().toFloat()
+        
+        val path = Path().apply {
+            moveTo(width * 0.5f, height * 0.05f)
+            lineTo(width * 0.9f, height * 0.2f)
+            lineTo(width * 0.9f, height * 0.55f)
+            quadTo(width * 0.9f, height * 0.85f, width * 0.5f, height * 0.95f)
+            quadTo(width * 0.1f, height * 0.85f, width * 0.1f, height * 0.55f)
+            lineTo(width * 0.1f, height * 0.2f)
+            close()
+        }
+        canvas.drawPath(path, paint)
+    }
+
+    override fun setAlpha(alpha: Int) { paint.alpha = alpha }
+    override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) { paint.colorFilter = colorFilter }
+    @Suppress("DEPRECATION")
+    override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
 }
 
 class MainActivity : Activity() {
@@ -1244,10 +1281,9 @@ class MainActivity : Activity() {
 
         for ((index, item) in themes.withIndex()) {
             val isSelected = (currentThemeKey == item.first)
-            val prefix = if (isSelected) "🛡️ " else "🛡️ "
 
             val themeTv = TextView(this).apply {
-                text = "$prefix${item.second}"
+                text = item.second
                 textSize = 15f
                 setTextColor(if (isSelected) Color.parseColor(item.third) else Color.WHITE)
                 typeface = if (isSelected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
@@ -1455,20 +1491,17 @@ class MainActivity : Activity() {
                 }
             }
 
-            // Щит в качестве индикатора статуса, строго по центру карточки
-            val statusBadge = TextView(this).apply {
-                text = "🛡️"
-                textSize = 18f
-                setTextColor(
-                    if (isSelected) Color.parseColor(accentColorHex)
-                    else Color.parseColor("#455A64")
-                )
-                gravity = Gravity.CENTER
-                val params = LinearLayout.LayoutParams(64, ViewGroup.LayoutParams.WRAP_CONTENT)
-                params.setMargins(0, 0, 12, 0)
+            // Программный векторный контур щита, подстраивающийся под цвет темы
+            val shieldView = View(this).apply {
+                val sizeInPx = (24 * resources.displayMetrics.density).toInt()
+                val params = LinearLayout.LayoutParams(sizeInPx, sizeInPx)
+                params.setMargins(0, 0, 16, 0)
                 layoutParams = params
+                
+                val shieldColor = if (isSelected) Color.parseColor(accentColorHex) else Color.parseColor("#455A64")
+                background = ShieldDrawable(shieldColor, isFilled = isSelected)
             }
-            card.addView(statusBadge)
+            card.addView(shieldView)
 
             val infoLayout = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
