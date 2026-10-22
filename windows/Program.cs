@@ -1,0 +1,1676 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
+using System.Text;
+using System.Text.Json;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Threading;
+using Microsoft.Win32;
+using Forms = System.Windows.Forms;
+
+namespace DnsSwitcherPro
+{
+    public class DnsServer
+    {
+        public string name { get; set; } = "";
+        public string host { get; set; } = "";
+        public int ping { get; set; } = -1;
+    }
+
+    public class AppConfig
+    {
+        public string Theme { get; set; } = "green";
+        public bool LightMode { get; set; } = false;
+        public bool AutoSortPing { get; set; } = true;
+        public bool EnableDohEncryption { get; set; } = true;
+        public string CurrentMode { get; set; } = "off"; // "off", "auto", "on"
+        public string LastActiveHost { get; set; } = "dns.comss.one";
+        public List<DnsServer> Servers { get; set; } = new();
+    }
+
+    public class Program
+    {
+        [STAThread]
+        public static void Main()
+        {
+            var app = new Application();
+            var mainWindow = new MainWindow();
+            app.Run(mainWindow);
+        }
+    }
+
+    public class MainWindow : Window
+    {
+        private AppConfig config = new();
+        private readonly string configPath;
+        private List<DnsServer> serverList = new();
+
+        // Элементы интерфейса
+        private ScrollViewer rootScroll = null!;
+        private StackPanel mainLayout = null!;
+        private StackPanel listContainer = null!;
+        private Border netStatusBorder = null!;
+        private TextBlock netStatusText = null!;
+        private Border modeCard = null!;
+        private TextBlock modeTitle = null!;
+        private RadioButton rbOff = null!;
+        private RadioButton rbAuto = null!;
+        private RadioButton rbOn = null!;
+        private TextBlock titleApp = null!;
+        private Border settingsBtn = null!;
+        private TextBlock listHeader = null!;
+        private Border pingBtnBorder = null!;
+        private TextBlock pingBtnText = null!;
+
+        // Плашка Undo
+        private Border undoBanner = null!;
+        private TextBlock undoText = null!;
+        private TextBlock undoActionBtn = null!;
+        private DnsServer? lastDeletedServer = null;
+        private int lastDeletedIndex = -1;
+        private DispatcherTimer undoTimer = null!;
+
+        // Системный трей
+        private Forms.NotifyIcon trayIcon = null!;
+        private bool isUpdatingUi = false;
+
+        // Цвета темы
+        private string accentColorHex = "#00E676";
+        private string accentCardBgHex = "#0D2318";
+        private string bgRootHex = "#08080A";
+        private string bgCardHex = "#121418";
+        private string bgCardStrokeHex = "#1E222B";
+        private string textMainColorHex = "#FFFFFF";
+        private string textSubColorHex = "#90A4AE";
+
+        // Резервные IPv4-адреса популярных DNS-серверов
+        private readonly Dictionary<string, string[]> knownIps = new(StringComparer.OrdinalIgnoreCase)
+        {
+            { "dns.comss.one", new[] { "83.220.169.155", "212.109.195.93" } },
+            { "comss.dns.controld.com", new[] { "76.76.2.22", "76.76.10.22" } },
+            { "dns.malw.link", new[] { "193.23.209.189", "45.95.233.23" } },
+            { "geohide.ru", new[] { "5.35.91.161" } },
+            { "dns.astracat.network", new[] { "185.236.231.114" } },
+            { "xbox-dns.ru", new[] { "176.99.11.77", "80.78.247.254" } },
+            { "dns.quad9.net", new[] { "9.9.9.9", "149.112.112.112" } },
+            { "dns.adguard-dns.com", new[] { "94.140.14.14", "94.140.15.15" } },
+            { "family.adguard-dns.com", new[] { "94.140.14.15", "94.140.15.16" } },
+            { "one.one.one.one", new[] { "1.1.1.1", "1.0.0.1" } },
+            { "security.cloudflare-dns.com", new[] { "1.1.1.2", "1.0.0.2" } },
+            { "dns.google", new[] { "8.8.8.8", "8.8.4.4" } },
+            { "freedns.controld.com", new[] { "76.76.2.0", "76.76.10.0" } },
+            { "dns.mullvad.net", new[] { "194.242.2.2" } },
+            { "security-filter-dns.cleanbrowsing.org", new[] { "185.228.168.9", "185.228.169.9" } }
+        };
+
+        private readonly List<DnsServer> defaultServers = new()
+        {
+            new DnsServer { name = "Comss.one", host = "dns.comss.one" },
+            new DnsServer { name = "Мобильная -1", host = "comss.dns.controld.com" },
+            new DnsServer { name = "📌 Malw.link", host = "dns.malw.link" },
+            new DnsServer { name = "🌍 GeoHide", host = "geohide.ru" },
+            new DnsServer { name = "Мобильная -2", host = "dns.astracat.network" },
+            new DnsServer { name = "Xbox", host = "xbox-dns.ru" },
+            new DnsServer { name = "Quad9", host = "dns.quad9.net" }
+        };
+
+        private readonly List<DnsServer> popularCatalog = new()
+        {
+            new DnsServer { name = "AdGuard DNS (Без рекламы)", host = "dns.adguard-dns.com" },
+            new DnsServer { name = "AdGuard Семейный", host = "family.adguard-dns.com" },
+            new DnsServer { name = "Cloudflare (Быстрый)", host = "one.one.one.one" },
+            new DnsServer { name = "Cloudflare Malware Block", host = "security.cloudflare-dns.com" },
+            new DnsServer { name = "Google Public DNS", host = "dns.google" },
+            new DnsServer { name = "Control D (Без рекламы)", host = "freedns.controld.com" },
+            new DnsServer { name = "Mullvad DNS (Приватность)", host = "dns.mullvad.net" },
+            new DnsServer { name = "CleanBrowsing (Фильтр)", host = "security-filter-dns.cleanbrowsing.org" },
+            new DnsServer { name = "Comss.one", host = "dns.comss.one" },
+            new DnsServer { name = "Мобильная -1", host = "comss.dns.controld.com" },
+            new DnsServer { name = "📌 Malw.link", host = "dns.malw.link" },
+            new DnsServer { name = "🌍 GeoHide", host = "geohide.ru" },
+            new DnsServer { name = "Мобильная -2", host = "dns.astracat.network" },
+            new DnsServer { name = "Xbox", host = "xbox-dns.ru" },
+            new DnsServer { name = "Quad9", host = "dns.quad9.net" }
+        };
+
+        public MainWindow()
+        {
+            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            string dir = Path.Combine(appData, "DnsSwitcherPro");
+            Directory.CreateDirectory(dir);
+            configPath = Path.Combine(dir, "config.json");
+
+            Title = "DNS Switcher Pro";
+            Width = 435;
+            Height = 770;
+            MinWidth = 395;
+            MinHeight = 600;
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+
+            LoadConfig();
+            ApplyThemePalette();
+            SetupUI();
+            SetupTrayIcon();
+
+            undoTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
+            undoTimer.Tick += (s, e) =>
+            {
+                undoBanner.Visibility = Visibility.Collapsed;
+                undoTimer.Stop();
+            };
+
+            Loaded += (s, e) =>
+            {
+                DetectInitialSystemMode();
+                RefreshSystemState();
+                CheckNetworkAndTestAll();
+            };
+
+            Closing += (s, e) =>
+            {
+                e.Cancel = true;
+                Hide();
+                trayIcon.ShowBalloonTip(1500, "DNS Switcher Pro", "Свёрнуто в трей. Правый клик по иконке — быстрое переключение DNS.", Forms.ToolTipIcon.Info);
+            };
+        }
+
+        private Brush BrushFromHex(string hex)
+        {
+            return (SolidColorBrush)new BrushConverter().ConvertFromString(hex)!;
+        }
+
+        // Векторный контур щита (серый в неактивном виде, залитый цветом темы в активном)
+        private UIElement CreateShieldIcon(string colorHex, bool isFilled)
+        {
+            return new System.Windows.Shapes.Path
+            {
+                Width = 22,
+                Height = 22,
+                Stretch = Stretch.Uniform,
+                Data = Geometry.Parse("M 12,2 L 21,6 L 21,13 C 21,18.5 17.2,23.2 12,24.5 C 6.8,23.2 3,18.5 3,13 L 3,6 Z"),
+                Stroke = BrushFromHex(colorHex),
+                StrokeThickness = 2.0,
+                Fill = isFilled ? BrushFromHex(colorHex) : Brushes.Transparent,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 14, 0)
+            };
+        }
+
+        private void SetupUI()
+        {
+            rootScroll = new ScrollViewer
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Background = BrushFromHex(bgRootHex)
+            };
+
+            mainLayout = new StackPanel
+            {
+                Margin = new Thickness(20, 20, 20, 24)
+            };
+
+            // Шапка
+            var topGrid = new Grid { Margin = new Thickness(0, 0, 0, 14) };
+            topGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            topGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            titleApp = new TextBlock
+            {
+                Text = "⚡ DNS SWITCHER PRO",
+                FontSize = 19,
+                FontWeight = FontWeights.Bold,
+                Foreground = BrushFromHex(accentColorHex),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            settingsBtn = new Border
+            {
+                Background = BrushFromHex(bgCardHex),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(1.5),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(12, 6, 12, 6),
+                Cursor = Cursors.Hand,
+                Child = new TextBlock
+                {
+                    Text = "⚙️",
+                    FontSize = 18,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                }
+            };
+            settingsBtn.MouseLeftButtonUp += (s, e) => ShowSettingsDialog();
+
+            Grid.SetColumn(titleApp, 0);
+            Grid.SetColumn(settingsBtn, 1);
+            topGrid.Children.Add(titleApp);
+            topGrid.Children.Add(settingsBtn);
+            mainLayout.Children.Add(topGrid);
+
+            // Статус сети
+            netStatusText = new TextBlock
+            {
+                Text = "Инициализация сети...",
+                FontSize = 12.5,
+                Foreground = BrushFromHex(textSubColorHex),
+                TextWrapping = TextWrapping.Wrap
+            };
+
+            netStatusBorder = new Border
+            {
+                Background = BrushFromHex(bgCardHex),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(1.5),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(14, 11, 14, 11),
+                Margin = new Thickness(0, 0, 0, 14),
+                Cursor = Cursors.Hand,
+                Child = netStatusText
+            };
+            netStatusBorder.MouseLeftButtonUp += (s, e) => VerifyActiveDnsInternet();
+            mainLayout.Children.Add(netStatusBorder);
+
+            // Карточка системного режима (Выкл / Авто / Вкл)
+            var modeInner = new StackPanel();
+            modeTitle = new TextBlock
+            {
+                Text = "СИСТЕМНЫЙ РЕЖИМ",
+                FontSize = 11.5,
+                FontWeight = FontWeights.Bold,
+                Foreground = BrushFromHex(textSubColorHex),
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+            modeInner.Children.Add(modeTitle);
+
+            var radioGrid = new Grid();
+            radioGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            radioGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            radioGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            rbOff = new RadioButton
+            {
+                Content = "Выкл",
+                FontSize = 14,
+                Foreground = BrushFromHex(textSubColorHex),
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Cursor = Cursors.Hand
+            };
+
+            rbAuto = new RadioButton
+            {
+                Content = "Авто",
+                FontSize = 14,
+                Foreground = BrushFromHex(textSubColorHex),
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Cursor = Cursors.Hand
+            };
+
+            rbOn = new RadioButton
+            {
+                Content = "Вкл",
+                FontSize = 14,
+                Foreground = BrushFromHex(textSubColorHex),
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Cursor = Cursors.Hand
+            };
+
+            rbOff.Checked += (s, e) =>
+            {
+                if (isUpdatingUi) return;
+                ResetWindowsDnsToDhcp(enableAutoEncryption: false);
+            };
+
+            rbAuto.Checked += (s, e) =>
+            {
+                if (isUpdatingUi) return;
+                ResetWindowsDnsToDhcp(enableAutoEncryption: true);
+            };
+
+            rbOn.Checked += (s, e) =>
+            {
+                if (isUpdatingUi) return;
+                string target = !string.IsNullOrEmpty(config.LastActiveHost)
+                    ? config.LastActiveHost
+                    : (serverList.Count > 0 ? serverList[0].host : "dns.comss.one");
+                ApplyWindowsDnsServer(target);
+            };
+
+            Grid.SetColumn(rbOff, 0);
+            Grid.SetColumn(rbAuto, 1);
+            Grid.SetColumn(rbOn, 2);
+            radioGrid.Children.Add(rbOff);
+            radioGrid.Children.Add(rbAuto);
+            radioGrid.Children.Add(rbOn);
+            modeInner.Children.Add(radioGrid);
+
+            modeCard = new Border
+            {
+                Background = BrushFromHex(bgCardHex),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(1.5),
+                CornerRadius = new CornerRadius(16),
+                Padding = new Thickness(16, 14, 16, 14),
+                Margin = new Thickness(0, 0, 0, 18),
+                Child = modeInner
+            };
+            mainLayout.Children.Add(modeCard);
+
+            // Заголовок списка + кнопка пинга
+            var headerGrid = new Grid { Margin = new Thickness(0, 0, 0, 12) };
+            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            listHeader = new TextBlock
+            {
+                Text = "ДОСТУПНЫЕ СЕРВЕРЫ",
+                FontSize = 11.5,
+                FontWeight = FontWeights.Bold,
+                Foreground = BrushFromHex(textSubColorHex),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            pingBtnText = new TextBlock
+            {
+                Text = "📡 Проверка пинг (порт 853)",
+                FontSize = 11.5,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = BrushFromHex(accentColorHex)
+            };
+
+            pingBtnBorder = new Border
+            {
+                Background = BrushFromHex(accentCardBgHex),
+                BorderBrush = BrushFromHex(accentColorHex),
+                BorderThickness = new Thickness(1.5),
+                CornerRadius = new CornerRadius(11),
+                Padding = new Thickness(12, 6, 12, 6),
+                Cursor = Cursors.Hand,
+                Child = pingBtnText
+            };
+            pingBtnBorder.MouseLeftButtonUp += (s, e) => CheckNetworkAndTestAll(false);
+
+            Grid.SetColumn(listHeader, 0);
+            Grid.SetColumn(pingBtnBorder, 1);
+            headerGrid.Children.Add(listHeader);
+            headerGrid.Children.Add(pingBtnBorder);
+            mainLayout.Children.Add(headerGrid);
+
+            // Плашка Undo
+            var undoGrid = new Grid();
+            undoGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            undoGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            undoText = new TextBlock
+            {
+                FontSize = 12.5,
+                Foreground = BrushFromHex(textMainColorHex),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            undoActionBtn = new TextBlock
+            {
+                Text = "↩️ ВЕРНУТЬ",
+                FontSize = 12.5,
+                FontWeight = FontWeights.Bold,
+                Foreground = BrushFromHex(accentColorHex),
+                Cursor = Cursors.Hand,
+                Padding = new Thickness(10, 4, 4, 4)
+            };
+            undoActionBtn.MouseLeftButtonUp += (s, e) =>
+            {
+                if (lastDeletedServer != null)
+                {
+                    int pos = Math.Clamp(lastDeletedIndex, 0, serverList.Count);
+                    serverList.Insert(pos, lastDeletedServer);
+                    lastDeletedServer = null;
+                    SaveConfig();
+                    RenderServerList();
+                    undoBanner.Visibility = Visibility.Collapsed;
+                    undoTimer.Stop();
+                }
+            };
+
+            Grid.SetColumn(undoText, 0);
+            Grid.SetColumn(undoActionBtn, 1);
+            undoGrid.Children.Add(undoText);
+            undoGrid.Children.Add(undoActionBtn);
+
+            undoBanner = new Border
+            {
+                Background = BrushFromHex(bgCardHex),
+                BorderBrush = BrushFromHex(accentColorHex),
+                BorderThickness = new Thickness(1.5),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(14, 10, 14, 10),
+                Margin = new Thickness(0, 0, 0, 12),
+                Visibility = Visibility.Collapsed,
+                Child = undoGrid
+            };
+            mainLayout.Children.Add(undoBanner);
+
+            listContainer = new StackPanel();
+            mainLayout.Children.Add(listContainer);
+
+            rootScroll.Content = mainLayout;
+            Content = rootScroll;
+        }
+
+        private void ApplyThemePalette()
+        {
+            switch (config.Theme)
+            {
+                case "green":
+                    accentColorHex = "#00E676";
+                    accentCardBgHex = config.LightMode ? "#E8F8F0" : "#0D2318";
+                    break;
+                case "blue":
+                    accentColorHex = "#00B0FF";
+                    accentCardBgHex = config.LightMode ? "#E8F4FE" : "#0A1D2C";
+                    break;
+                case "purple":
+                    accentColorHex = "#E040FB";
+                    accentCardBgHex = config.LightMode ? "#FBE9FE" : "#230A2C";
+                    break;
+                case "amber":
+                    accentColorHex = "#FFAB00";
+                    accentCardBgHex = config.LightMode ? "#FFF8E1" : "#2C200A";
+                    break;
+            }
+
+            if (config.LightMode)
+            {
+                bgRootHex = "#F4F5F7";
+                bgCardHex = "#FFFFFF";
+                bgCardStrokeHex = "#E0E0E0";
+                textMainColorHex = "#121212";
+                textSubColorHex = "#546E7A";
+            }
+            else
+            {
+                bgRootHex = "#08080A";
+                bgCardHex = "#121418";
+                bgCardStrokeHex = "#1E222B";
+                textMainColorHex = "#FFFFFF";
+                textSubColorHex = "#90A4AE";
+            }
+        }
+
+        private void UpdateUIColors()
+        {
+            ApplyThemePalette();
+            rootScroll.Background = BrushFromHex(bgRootHex);
+            titleApp.Foreground = BrushFromHex(accentColorHex);
+            settingsBtn.Background = BrushFromHex(bgCardHex);
+            settingsBtn.BorderBrush = BrushFromHex(bgCardStrokeHex);
+            netStatusBorder.Background = BrushFromHex(bgCardHex);
+            netStatusBorder.BorderBrush = BrushFromHex(bgCardStrokeHex);
+            netStatusText.Foreground = BrushFromHex(textSubColorHex);
+            listHeader.Foreground = BrushFromHex(textSubColorHex);
+            pingBtnBorder.Background = BrushFromHex(accentCardBgHex);
+            pingBtnBorder.BorderBrush = BrushFromHex(accentColorHex);
+            pingBtnText.Foreground = BrushFromHex(accentColorHex);
+            undoBanner.Background = BrushFromHex(bgCardHex);
+            undoBanner.BorderBrush = BrushFromHex(accentColorHex);
+            undoText.Foreground = BrushFromHex(textMainColorHex);
+            undoActionBtn.Foreground = BrushFromHex(accentColorHex);
+            RefreshSystemState();
+        }
+
+        private NetworkInterface? GetActiveNetworkInterface()
+        {
+            return NetworkInterface.GetAllNetworkInterfaces()
+                .Where(n => n.OperationalStatus == OperationalStatus.Up &&
+                            n.NetworkInterfaceType != NetworkInterfaceType.Loopback &&
+                            !n.Description.Contains("Virtual", StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(n => n.GetIPProperties().GatewayAddresses.Count)
+                .FirstOrDefault();
+        }
+
+        private void DetectInitialSystemMode()
+        {
+            var nic = GetActiveNetworkInterface();
+            if (nic == null) return;
+
+            var dnsAddresses = nic.GetIPProperties().DnsAddresses
+                .Where(ip => ip.AddressFamily == AddressFamily.InterNetwork)
+                .Select(ip => ip.ToString())
+                .ToList();
+
+            foreach (var kv in knownIps)
+            {
+                if (dnsAddresses.Any(d => kv.Value.Contains(d)))
+                {
+                    config.CurrentMode = "on";
+                    config.LastActiveHost = kv.Key;
+                    return;
+                }
+            }
+        }
+
+        private string[] ResolveHostToIpv4(string host)
+        {
+            try
+            {
+                var ips = Dns.GetHostAddresses(host)
+                    .Where(ip => ip.AddressFamily == AddressFamily.InterNetwork)
+                    .Select(ip => ip.ToString())
+                    .Distinct()
+                    .ToArray();
+                if (ips.Length > 0)
+                {
+                    knownIps[host] = ips;
+                    return ips;
+                }
+            }
+            catch { }
+
+            if (knownIps.TryGetValue(host, out var fallback))
+            {
+                return fallback;
+            }
+            return Array.Empty<string>();
+        }
+
+        // Регистрация шаблона DoH и принудительное включение шифрования в реестре Windows 11/10
+        private void ConfigureWindowsDohForServer(string ifaceGuid, string host, string[] ips)
+        {
+            string dohTemplate = $"https://{host}/dns-query";
+
+            foreach (var ip in ips)
+            {
+                // 1. Добавляем шаблон DoH в системный список Windows через netsh (Windows 11)
+                RunCommand($"netsh dns add encryption server={ip} dohtemplate={dohTemplate} autoupgrade=yes udpfallback=no");
+
+                // 2. Дублируем регистрацию через системный реестр DohWellKnownServers и интерфесный ключ Doh
+                try
+                {
+                    using var wellKnownKey = Registry.LocalMachine.CreateSubKey(
+                        $@"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DohWellKnownServers\{ip}", true);
+                    wellKnownKey?.SetValue("Template", dohTemplate, RegistryValueKind.String);
+
+                    using var ifaceDohKey = Registry.LocalMachine.CreateSubKey(
+                        $@"SYSTEM\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\{ifaceGuid}\DohInterfaceSettings\Doh\{ip}", true);
+                    ifaceDohKey?.SetValue("DohFlags", 1L, RegistryValueKind.QWord);
+                    ifaceDohKey?.SetValue("DohTemplate", dohTemplate, RegistryValueKind.String);
+                }
+                catch { }
+            }
+        }
+
+        private void ClearInterfaceDohRegistry(string ifaceGuid)
+        {
+            try
+            {
+                Registry.LocalMachine.DeleteSubKeyTree(
+                    $@"SYSTEM\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\{ifaceGuid}\DohInterfaceSettings\Doh", false);
+            }
+            catch { }
+        }
+
+        private void ApplyWindowsDnsServer(string host)
+        {
+            var nic = GetActiveNetworkInterface();
+            if (nic == null)
+            {
+                MessageBox.Show("Не найден активный сетевой адаптер!", "Ошибка сети", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            var ips = ResolveHostToIpv4(host);
+            if (ips.Length == 0)
+            {
+                MessageBox.Show($"Не удалось определить IPv4-адрес для {host}. Проверьте подключение к сети.", "Ошибка резолвинга", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            string ifaceName = nic.Name;
+            string ifaceGuid = nic.Id;
+
+            RunCommand($"netsh interface ipv4 set dnsservers name=\"{ifaceName}\" static {ips[0]} primary");
+            if (ips.Length > 1)
+            {
+                RunCommand($"netsh interface ipv4 add dnsservers name=\"{ifaceName}\" {ips[1]} index=2");
+            }
+
+            if (config.EnableDohEncryption)
+            {
+                ConfigureWindowsDohForServer(ifaceGuid, host, ips);
+            }
+            else
+            {
+                ClearInterfaceDohRegistry(ifaceGuid);
+            }
+
+            RunCommand("ipconfig /flushdns");
+
+            config.CurrentMode = "on";
+            config.LastActiveHost = host;
+            SaveConfig();
+            RefreshSystemState();
+            UpdateTrayMenu();
+        }
+
+        private void ResetWindowsDnsToDhcp(bool enableAutoEncryption)
+        {
+            var nic = GetActiveNetworkInterface();
+            if (nic != null)
+            {
+                RunCommand($"netsh interface ipv4 set dnsservers name=\"{nic.Name}\" source=dhcp");
+                ClearInterfaceDohRegistry(nic.Id);
+
+                if (enableAutoEncryption)
+                {
+                    // В режиме «Авто» включаем автоматический апгрейд известных DNS до DoH
+                    var currentDns = nic.GetIPProperties().DnsAddresses
+                        .Where(ip => ip.AddressFamily == AddressFamily.InterNetwork)
+                        .Select(ip => ip.ToString());
+                    foreach (var ip in currentDns)
+                    {
+                        try
+                        {
+                            using var ifaceDohKey = Registry.LocalMachine.CreateSubKey(
+                                $@"SYSTEM\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\{nic.Id}\DohInterfaceSettings\Doh\{ip}", true);
+                            ifaceDohKey?.SetValue("DohFlags", 1L, RegistryValueKind.QWord);
+                        }
+                        catch { }
+                    }
+                }
+
+                RunCommand("ipconfig /flushdns");
+            }
+
+            config.CurrentMode = enableAutoEncryption ? "auto" : "off";
+            SaveConfig();
+            RefreshSystemState();
+            UpdateTrayMenu();
+        }
+
+        private void RunCommand(string cmd)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("cmd.exe", "/c " + cmd)
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                using var p = Process.Start(psi);
+                p?.WaitForExit(3000);
+            }
+            catch { }
+        }
+
+        private void RefreshSystemState()
+        {
+            isUpdatingUi = true;
+
+            rbOff.Foreground = BrushFromHex(textSubColorHex);
+            rbOff.FontWeight = FontWeights.Normal;
+            rbAuto.Foreground = BrushFromHex(textSubColorHex);
+            rbAuto.FontWeight = FontWeights.Normal;
+            rbOn.Foreground = BrushFromHex(textSubColorHex);
+            rbOn.FontWeight = FontWeights.Normal;
+
+            switch (config.CurrentMode)
+            {
+                case "on":
+                    rbOn.IsChecked = true;
+                    rbOn.Foreground = BrushFromHex(accentColorHex);
+                    rbOn.FontWeight = FontWeights.Bold;
+
+                    modeCard.Background = BrushFromHex(accentCardBgHex);
+                    modeCard.BorderBrush = BrushFromHex(accentColorHex);
+                    string dohStatus = config.EnableDohEncryption ? " (DoH ШИФРОВАНИЕ)" : "";
+                    modeTitle.Text = $"СИСТЕМНЫЙ РЕЖИМ: ВКЛЮЧЕН{dohStatus}";
+                    modeTitle.Foreground = BrushFromHex(accentColorHex);
+                    break;
+
+                case "auto":
+                    rbAuto.IsChecked = true;
+                    rbAuto.Foreground = BrushFromHex(accentColorHex);
+                    rbAuto.FontWeight = FontWeights.Bold;
+
+                    modeCard.Background = BrushFromHex(accentCardBgHex);
+                    modeCard.BorderBrush = BrushFromHex(accentColorHex);
+                    modeTitle.Text = "СИСТЕМНЫЙ РЕЖИМ: АВТО";
+                    modeTitle.Foreground = BrushFromHex(accentColorHex);
+                    break;
+
+                default:
+                    rbOff.IsChecked = true;
+                    rbOff.Foreground = BrushFromHex("#FF5252");
+                    rbOff.FontWeight = FontWeights.Bold;
+
+                    modeCard.Background = BrushFromHex(config.LightMode ? "#FFEBEE" : "#1F1214");
+                    modeCard.BorderBrush = BrushFromHex("#FF5252");
+                    modeTitle.Text = "СИСТЕМНЫЙ РЕЖИМ: ОТКЛЮЧЕН";
+                    modeTitle.Foreground = BrushFromHex("#FF5252");
+                    break;
+            }
+
+            isUpdatingUi = false;
+            RenderServerList();
+        }
+
+        private void RenderServerList()
+        {
+            listContainer.Children.Clear();
+            string? activeHost = config.CurrentMode == "on" ? config.LastActiveHost : null;
+
+            for (int i = 0; i < serverList.Count; i++)
+            {
+                int index = i;
+                var server = serverList[i];
+                bool isSelected = !string.IsNullOrEmpty(activeHost) &&
+                                  string.Equals(activeHost, server.host, StringComparison.OrdinalIgnoreCase);
+
+                var cardGrid = new Grid();
+                cardGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                cardGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                cardGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+                // 1. Векторный контур щита по центру
+                string shieldColor = isSelected ? accentColorHex : textSubColorHex;
+                var shieldIcon = CreateShieldIcon(shieldColor, isSelected);
+                Grid.SetColumn(shieldIcon, 0);
+                cardGrid.Children.Add(shieldIcon);
+
+                // 2. Информация о сервере
+                var infoStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+                var nameRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+
+                var nameTv = new TextBlock
+                {
+                    Text = server.name,
+                    FontSize = 15,
+                    FontWeight = FontWeights.Bold,
+                    Foreground = BrushFromHex(textMainColorHex),
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                nameRow.Children.Add(nameTv);
+
+                if (isSelected)
+                {
+                    var onlineBadge = new Border
+                    {
+                        Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#08080A"),
+                        BorderBrush = BrushFromHex(accentColorHex),
+                        BorderThickness = new Thickness(1),
+                        CornerRadius = new CornerRadius(6),
+                        Padding = new Thickness(6, 1, 6, 1),
+                        Margin = new Thickness(8, 0, 0, 0),
+                        Child = new TextBlock
+                        {
+                            Text = "ONLINE",
+                            FontSize = 9,
+                            FontWeight = FontWeights.Bold,
+                            Foreground = BrushFromHex(accentColorHex)
+                        }
+                    };
+                    nameRow.Children.Add(onlineBadge);
+                }
+
+                string pingPart = server.ping switch
+                {
+                    -1 => "",
+                    -2 => " • ⏳...",
+                    -3 => " • ❌ Блок (853)",
+                    _ => $" • ⚡ {server.ping} мс"
+                };
+
+                var subTv = new TextBlock
+                {
+                    Text = $"{server.host}{pingPart}",
+                    FontSize = 12.5,
+                    Foreground = BrushFromHex(server.ping == -3 ? "#FF5252" : textSubColorHex),
+                    Margin = new Thickness(0, 3, 0, 0)
+                };
+
+                infoStack.Children.Add(nameRow);
+                infoStack.Children.Add(subTv);
+                Grid.SetColumn(infoStack, 1);
+                cardGrid.Children.Add(infoStack);
+
+                // 3. Кнопка ⋮
+                var moreBtn = new Border
+                {
+                    Width = 36,
+                    Height = 36,
+                    Background = BrushFromHex(config.LightMode ? "#EFEFF1" : "#181B22"),
+                    BorderBrush = BrushFromHex(bgCardStrokeHex),
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(10),
+                    Margin = new Thickness(8, 0, 0, 0),
+                    Cursor = Cursors.Hand,
+                    Child = new TextBlock
+                    {
+                        Text = "⋮",
+                        FontSize = 18,
+                        FontWeight = FontWeights.Bold,
+                        Foreground = BrushFromHex(textSubColorHex),
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center
+                    }
+                };
+                moreBtn.MouseLeftButtonUp += (s, e) =>
+                {
+                    e.Handled = true;
+                    ShowServerActionsDialog(index);
+                };
+                Grid.SetColumn(moreBtn, 2);
+                cardGrid.Children.Add(moreBtn);
+
+                var cardBorder = new Border
+                {
+                    Background = BrushFromHex(isSelected ? accentCardBgHex : bgCardHex),
+                    BorderBrush = BrushFromHex(isSelected ? accentColorHex : bgCardStrokeHex),
+                    BorderThickness = new Thickness(1.5),
+                    CornerRadius = new CornerRadius(14),
+                    Padding = new Thickness(14, 12, 12, 12),
+                    Margin = new Thickness(0, 0, 0, 9),
+                    Cursor = Cursors.Hand,
+                    Child = cardGrid
+                };
+
+                cardBorder.MouseLeftButtonUp += (s, e) =>
+                {
+                    if (!e.Handled)
+                    {
+                        ApplyWindowsDnsServer(server.host);
+                    }
+                };
+
+                cardBorder.MouseRightButtonUp += (s, e) =>
+                {
+                    Clipboard.SetText(server.host);
+                    netStatusText.Text = $"📋 Скопировано в буфер: {server.host}";
+                };
+
+                listContainer.Children.Add(cardBorder);
+            }
+        }
+
+        private async void CheckNetworkAndTestAll(bool autoConnectBest = false)
+        {
+            var nic = GetActiveNetworkInterface();
+            string netType = nic != null ? $"{nic.Name} 🌐" : "Нет сети ❌";
+            netStatusText.Text = $"{netType} • Проверка порта 853 и DNS...";
+
+            foreach (var s in serverList) s.ping = -2;
+            RenderServerList();
+
+            await Task.Run(() =>
+            {
+                foreach (var server in serverList.ToList())
+                {
+                    var sw = Stopwatch.StartNew();
+                    int resultPing = -3;
+                    try
+                    {
+                        using var client = new TcpClient();
+                        var task = client.ConnectAsync(server.host, 853);
+                        if (task.Wait(2200) && client.Connected)
+                        {
+                            sw.Stop();
+                            resultPing = (int)sw.ElapsedMilliseconds;
+                        }
+                    }
+                    catch
+                    {
+                        resultPing = -3;
+                    }
+                    server.ping = resultPing;
+                }
+            });
+
+            bool dnsResolves = await Task.Run(() =>
+            {
+                try
+                {
+                    var res = Dns.GetHostAddresses("google.com");
+                    return res != null && res.Length > 0;
+                }
+                catch { return false; }
+            });
+
+            if (config.AutoSortPing)
+            {
+                serverList = serverList.OrderBy(s => s.ping > 0 ? s.ping : int.MaxValue).ToList();
+            }
+            SaveConfig();
+
+            int workingCount = serverList.Count(s => s.ping > 0);
+            string resolveBadge = dnsResolves ? "DNS: OK ✅" : "DNS: Сбой ⚠️";
+            netStatusText.Text = $"{netType} • DoT: {workingCount}/{serverList.Count} • {resolveBadge}";
+            RenderServerList();
+
+            if (autoConnectBest)
+            {
+                var best = serverList.Where(s => s.ping > 0).OrderBy(s => s.ping).FirstOrDefault();
+                if (best != null)
+                {
+                    ApplyWindowsDnsServer(best.host);
+                }
+            }
+        }
+
+        private async void VerifyActiveDnsInternet()
+        {
+            netStatusText.Text = "⏳ Проверка интернет-отклика и DNS-резолвинга...";
+            var sw = Stopwatch.StartNew();
+            bool ok = await Task.Run(() =>
+            {
+                try
+                {
+                    var a = Dns.GetHostAddresses("google.com");
+                    return a.Length > 0;
+                }
+                catch { return false; }
+            });
+            sw.Stop();
+            int workingCount = serverList.Count(s => s.ping > 0);
+            netStatusText.Text = ok
+                ? $"🌐 DNS резолвинг: OK ({sw.ElapsedMilliseconds} мс) ✅ • DoT: {workingCount}/{serverList.Count}"
+                : $"⚠️ Сбой разрешения доменов ❌ • DoT: {workingCount}/{serverList.Count}";
+        }
+
+        private Window CreateModalDialog(string title, Action? onBackAction = null)
+        {
+            var win = new Window
+            {
+                Title = title,
+                Width = 395,
+                SizeToContent = SizeToContent.Height,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this,
+                ResizeMode = ResizeMode.NoResize,
+                WindowStyle = WindowStyle.None,
+                AllowsTransparency = true,
+                Background = Brushes.Transparent
+            };
+
+            win.PreviewKeyDown += (s, e) =>
+            {
+                if (e.Key == Key.Escape)
+                {
+                    e.Handled = true;
+                    win.Close();
+                    onBackAction?.Invoke();
+                }
+            };
+
+            return win;
+        }
+
+        private TextBlock CreateDialogHeader(string text)
+        {
+            return new TextBlock
+            {
+                Text = text,
+                FontSize = 17,
+                FontWeight = FontWeights.Bold,
+                Foreground = BrushFromHex(textMainColorHex),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(8, 4, 8, 18)
+            };
+        }
+
+        private Border CreateMenuCard(string title, string subtitle, Action onClick, string? customStroke = null, string? customTitleColor = null)
+        {
+            var stack = new StackPanel();
+            stack.Children.Add(new TextBlock
+            {
+                Text = title,
+                FontSize = 14,
+                FontWeight = FontWeights.Bold,
+                Foreground = BrushFromHex(customTitleColor ?? textMainColorHex)
+            });
+            stack.Children.Add(new TextBlock
+            {
+                Text = subtitle,
+                FontSize = 11.5,
+                Foreground = BrushFromHex(textSubColorHex),
+                Margin = new Thickness(0, 3, 0, 0)
+            });
+
+            var border = new Border
+            {
+                Background = BrushFromHex(bgCardHex),
+                BorderBrush = BrushFromHex(customStroke ?? bgCardStrokeHex),
+                BorderThickness = new Thickness(1.5),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(14, 11, 14, 11),
+                Margin = new Thickness(0, 0, 0, 10),
+                Cursor = Cursors.Hand,
+                Child = stack
+            };
+            border.MouseLeftButtonUp += (s, e) => onClick();
+            return border;
+        }
+
+        private Border CreateDialogButton(string text, string textColorHex, Action onClick, string? bgHex = null, string? strokeHex = null)
+        {
+            var btn = new Border
+            {
+                Background = BrushFromHex(bgHex ?? bgCardHex),
+                BorderBrush = BrushFromHex(strokeHex ?? bgCardStrokeHex),
+                BorderThickness = new Thickness(1.5),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(14, 11, 14, 11),
+                Margin = new Thickness(0, 6, 0, 0),
+                Cursor = Cursors.Hand,
+                Child = new TextBlock
+                {
+                    Text = text,
+                    FontSize = 14,
+                    FontWeight = FontWeights.Bold,
+                    Foreground = BrushFromHex(textColorHex),
+                    HorizontalAlignment = HorizontalAlignment.Center
+                }
+            };
+            btn.MouseLeftButtonUp += (s, e) => onClick();
+            return btn;
+        }
+
+        private void ShowSettingsDialog()
+        {
+            var dlg = CreateModalDialog("Настройки");
+            var root = new StackPanel();
+            root.Children.Add(CreateDialogHeader("⚙️ Настройки приложения"));
+
+            root.Children.Add(CreateMenuCard("➕ Добавить свой сервер", "Ручной ввод хоста и имени", () =>
+            {
+                dlg.Close();
+                ShowEditServerDialog(null, returnToSettings: true);
+            }));
+
+            root.Children.Add(CreateMenuCard("📚 Популярные DNS-серверы", "Каталог проверенных серверов", () =>
+            {
+                dlg.Close();
+                ShowPresetsDialog();
+            }));
+
+            root.Children.Add(CreateMenuCard("📊 Ping Benchmark (Топ серверов)", "Анализ скорости и автовыбор лидера", () =>
+            {
+                dlg.Close();
+                ShowBenchmarkDialog();
+            }));
+
+            root.Children.Add(CreateMenuCard("💾 Бэкап и сброс настроек", "Экспорт/импорт JSON, сброс списка", () =>
+            {
+                dlg.Close();
+                ShowBackupDialog();
+            }));
+
+            root.Children.Add(CreateMenuCard("✨ Кастомизация", "Тема, DoH-шифрование, светлый/темный режим", () =>
+            {
+                dlg.Close();
+                ShowCustomizationDialog();
+            }));
+
+            root.Children.Add(CreateDialogButton("Закрыть", accentColorHex, () => dlg.Close()));
+
+            dlg.Content = new Border
+            {
+                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(20),
+                Padding = new Thickness(22, 18, 22, 18),
+                Child = root
+            };
+            dlg.ShowDialog();
+        }
+
+        private void ShowBenchmarkDialog()
+        {
+            var dlg = CreateModalDialog("Ping Benchmark", () => ShowSettingsDialog());
+            var root = new StackPanel();
+            root.Children.Add(CreateDialogHeader("📊 Ping Benchmark — Топ серверов"));
+
+            var listBox = new StackPanel();
+            var sorted = serverList.OrderBy(s => s.ping > 0 ? s.ping : int.MaxValue).ToList();
+
+            for (int i = 0; i < sorted.Count; i++)
+            {
+                var srv = sorted[i];
+                string rank = i switch
+                {
+                    0 => "🥇 #1",
+                    1 => "🥈 #2",
+                    2 => "🥉 #3",
+                    _ => $"   #{i + 1}"
+                };
+
+                string pingText = srv.ping switch
+                {
+                    -1 => "Не проверен",
+                    -2 => "⏳ Тестирование...",
+                    -3 => "❌ Заблокирован (порт 853)",
+                    _ => $"⚡ {srv.ping} мс"
+                };
+
+                listBox.Children.Add(CreateMenuCard($"{rank}  {srv.name}", $"{pingText} ({srv.host})", () =>
+                {
+                    dlg.Close();
+                    ApplyWindowsDnsServer(srv.host);
+                }));
+            }
+
+            var scroll = new ScrollViewer
+            {
+                MaxHeight = 290,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Content = listBox
+            };
+            root.Children.Add(scroll);
+
+            root.Children.Add(CreateDialogButton("⚡ Автовыбор (Подключить лучший #1)", accentColorHex, () =>
+            {
+                dlg.Close();
+                var best = serverList.Where(s => s.ping > 0).OrderBy(s => s.ping).FirstOrDefault();
+                if (best != null)
+                {
+                    ApplyWindowsDnsServer(best.host);
+                }
+                else
+                {
+                    CheckNetworkAndTestAll(true);
+                }
+            }, accentCardBgHex, accentColorHex));
+
+            root.Children.Add(CreateDialogButton("🔄 Запустить тест скорости", textMainColorHex, () =>
+            {
+                dlg.Close();
+                CheckNetworkAndTestAll(false);
+            }));
+
+            root.Children.Add(CreateDialogButton("Назад к настройкам", textSubColorHex, () =>
+            {
+                dlg.Close();
+                ShowSettingsDialog();
+            }));
+
+            dlg.Content = new Border
+            {
+                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(20),
+                Padding = new Thickness(22, 18, 22, 18),
+                Child = root
+            };
+            dlg.ShowDialog();
+        }
+
+        private void ShowCustomizationDialog()
+        {
+            var dlg = CreateModalDialog("Кастомизация", () => ShowSettingsDialog());
+            var root = new StackPanel();
+            root.Children.Add(CreateDialogHeader("✨ Кастомизация"));
+
+            root.Children.Add(CreateMenuCard("🎨 Выбор темы и акцента", "Зеленый, Синий, Фиолетовый, Янтарный", () =>
+            {
+                dlg.Close();
+                ShowThemeChooserDialog();
+            }));
+
+            root.Children.Add(CreateMenuCard("☀️ Режим интерфейса", config.LightMode ? "Сейчас: Светлая тема" : "Сейчас: Темная тема", () =>
+            {
+                config.LightMode = !config.LightMode;
+                SaveConfig();
+                UpdateUIColors();
+                dlg.Close();
+                ShowCustomizationDialog();
+            }));
+
+            root.Children.Add(CreateMenuCard("🔒 Нативное шифрование DoH (Windows 11)",
+                config.EnableDohEncryption ? "Сейчас: Включено (https://.../dns-query)" : "Сейчас: Отключено (только классический IPv4)", () =>
+            {
+                config.EnableDohEncryption = !config.EnableDohEncryption;
+                SaveConfig();
+                if (config.CurrentMode == "on" && !string.IsNullOrEmpty(config.LastActiveHost))
+                {
+                    ApplyWindowsDnsServer(config.LastActiveHost);
+                }
+                dlg.Close();
+                ShowCustomizationDialog();
+            }));
+
+            root.Children.Add(CreateMenuCard("🔀 Автосортировка по пингу", config.AutoSortPing ? "Сейчас: Включена (быстрые сверху)" : "Сейчас: Отключена", () =>
+            {
+                config.AutoSortPing = !config.AutoSortPing;
+                SaveConfig();
+                if (config.AutoSortPing)
+                {
+                    serverList = serverList.OrderBy(s => s.ping > 0 ? s.ping : int.MaxValue).ToList();
+                    RenderServerList();
+                }
+                dlg.Close();
+                ShowCustomizationDialog();
+            }));
+
+            root.Children.Add(CreateDialogButton("Назад к настройкам", accentColorHex, () =>
+            {
+                dlg.Close();
+                ShowSettingsDialog();
+            }));
+
+            dlg.Content = new Border
+            {
+                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(20),
+                Padding = new Thickness(22, 18, 22, 18),
+                Child = root
+            };
+            dlg.ShowDialog();
+        }
+
+        private void ShowThemeChooserDialog()
+        {
+            var dlg = CreateModalDialog("Выбор темы", () => ShowCustomizationDialog());
+            var root = new StackPanel();
+            root.Children.Add(CreateDialogHeader("🎨 Выбор темы оформления"));
+
+            var themes = new (string key, string title, string color)[]
+            {
+                ("green", "🟢 Neon Green (Классический неон)", "#00E676"),
+                ("blue", "🔵 Cyber Blue (Неоновый голубой)", "#00B0FF"),
+                ("purple", "🟣 Synthwave Purple (Фиолетовый кибер)", "#E040FB"),
+                ("amber", "🟠 Amber Glow (Янтарный премиум)", "#FFAB00")
+            };
+
+            foreach (var t in themes)
+            {
+                bool isSel = config.Theme == t.key;
+                root.Children.Add(CreateMenuCard(t.title, isSel ? "Активная тема" : "Нажмите для применения", () =>
+                {
+                    config.Theme = t.key;
+                    SaveConfig();
+                    UpdateUIColors();
+                    dlg.Close();
+                    ShowCustomizationDialog();
+                }, isSel ? t.color : null, isSel ? t.color : null));
+            }
+
+            root.Children.Add(CreateDialogButton("Назад к кастомизации", accentColorHex, () =>
+            {
+                dlg.Close();
+                ShowCustomizationDialog();
+            }));
+
+            dlg.Content = new Border
+            {
+                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(20),
+                Padding = new Thickness(22, 18, 22, 18),
+                Child = root
+            };
+            dlg.ShowDialog();
+        }
+
+        private void ShowServerActionsDialog(int index)
+        {
+            if (index < 0 || index >= serverList.Count) return;
+            var server = serverList[index];
+            var dlg = CreateModalDialog(server.name);
+            var root = new StackPanel();
+
+            root.Children.Add(CreateDialogHeader(server.name));
+
+            root.Children.Add(CreateMenuCard("✏️ Редактировать", "Изменить название или адрес хоста", () =>
+            {
+                dlg.Close();
+                ShowEditServerDialog(index, returnToSettings: false);
+            }));
+
+            root.Children.Add(CreateMenuCard("🗑️ Удалить", "Удалить сервер из вашего списка", () =>
+            {
+                dlg.Close();
+                lastDeletedServer = serverList[index];
+                lastDeletedIndex = index;
+                serverList.RemoveAt(index);
+                SaveConfig();
+                RenderServerList();
+
+                undoText.Text = $"Удален «{lastDeletedServer.name}»";
+                undoBanner.Visibility = Visibility.Visible;
+                undoTimer.Stop();
+                undoTimer.Start();
+            }, "#FF5252", "#FF5252"));
+
+            root.Children.Add(CreateDialogButton("Отмена", accentColorHex, () => dlg.Close()));
+
+            dlg.Content = new Border
+            {
+                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(20),
+                Padding = new Thickness(22, 18, 22, 18),
+                Child = root
+            };
+            dlg.ShowDialog();
+        }
+
+        private void ShowEditServerDialog(int? editIndex, bool returnToSettings)
+        {
+            bool isEdit = editIndex.HasValue && editIndex.Value >= 0;
+            var current = isEdit ? serverList[editIndex!.Value] : null;
+
+            var dlg = CreateModalDialog("Сервер", () =>
+            {
+                if (returnToSettings) ShowSettingsDialog();
+            });
+
+            var root = new StackPanel();
+            root.Children.Add(CreateDialogHeader(isEdit ? "✏️ Редактировать сервер" : "➕ Добавить свой сервер"));
+
+            var nameBox = new TextBox
+            {
+                Text = current?.name ?? "",
+                FontSize = 14,
+                Foreground = BrushFromHex(textMainColorHex),
+                Background = BrushFromHex(bgCardHex),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                Padding = new Thickness(10, 8, 10, 8),
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+
+            var hostBox = new TextBox
+            {
+                Text = current?.host ?? "",
+                FontSize = 14,
+                Foreground = BrushFromHex(textMainColorHex),
+                Background = BrushFromHex(bgCardHex),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                Padding = new Thickness(10, 8, 10, 8),
+                Margin = new Thickness(0, 0, 0, 14)
+            };
+
+            root.Children.Add(new TextBlock { Text = "Название:", Foreground = BrushFromHex(textSubColorHex), Margin = new Thickness(0, 0, 0, 4) });
+            root.Children.Add(nameBox);
+            root.Children.Add(new TextBlock { Text = "Хост (например, dns.comss.one):", Foreground = BrushFromHex(textSubColorHex), Margin = new Thickness(0, 0, 0, 4) });
+            root.Children.Add(hostBox);
+
+            root.Children.Add(CreateDialogButton("Сохранить", accentColorHex, () =>
+            {
+                string cleanHost = hostBox.Text.Trim().ToLowerInvariant()
+                    .Replace("https://", "").Replace("http://", "").Replace("tls://", "");
+                if (cleanHost.Contains('/')) cleanHost = cleanHost.Split('/')[0];
+                if (cleanHost.Contains(':')) cleanHost = cleanHost.Split(':')[0];
+
+                if (string.IsNullOrEmpty(cleanHost)) return;
+                string cleanName = string.IsNullOrWhiteSpace(nameBox.Text) ? cleanHost : nameBox.Text.Trim();
+
+                if (isEdit)
+                {
+                    serverList[editIndex!.Value].name = cleanName;
+                    serverList[editIndex!.Value].host = cleanHost;
+                }
+                else
+                {
+                    serverList.Add(new DnsServer { name = cleanName, host = cleanHost });
+                }
+                SaveConfig();
+                dlg.Close();
+                CheckNetworkAndTestAll();
+            }, accentCardBgHex, accentColorHex));
+
+            root.Children.Add(CreateDialogButton("Назад", textSubColorHex, () =>
+            {
+                dlg.Close();
+                if (returnToSettings) ShowSettingsDialog();
+            }));
+
+            dlg.Content = new Border
+            {
+                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(20),
+                Padding = new Thickness(22, 18, 22, 18),
+                Child = root
+            };
+            dlg.ShowDialog();
+        }
+
+        private void ShowPresetsDialog()
+        {
+            var dlg = CreateModalDialog("Популярные серверы", () => ShowSettingsDialog());
+            var root = new StackPanel();
+            root.Children.Add(CreateDialogHeader("📚 Популярные DNS-серверы"));
+
+            var listStack = new StackPanel();
+            foreach (var item in popularCatalog)
+            {
+                listStack.Children.Add(CreateMenuCard(item.name, item.host, () =>
+                {
+                    if (!serverList.Any(s => string.Equals(s.host, item.host, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        serverList.Add(new DnsServer { name = item.name, host = item.host });
+                        SaveConfig();
+                        CheckNetworkAndTestAll();
+                    }
+                    dlg.Close();
+                }));
+            }
+
+            var scroll = new ScrollViewer
+            {
+                MaxHeight = 310,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Content = listStack
+            };
+            root.Children.Add(scroll);
+
+            root.Children.Add(CreateDialogButton("➕ Добавить все недостающие", accentColorHex, () =>
+            {
+                foreach (var p in popularCatalog)
+                {
+                    if (!serverList.Any(s => string.Equals(s.host, p.host, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        serverList.Add(new DnsServer { name = p.name, host = p.host });
+                    }
+                }
+                SaveConfig();
+                dlg.Close();
+                CheckNetworkAndTestAll();
+            }));
+
+            root.Children.Add(CreateDialogButton("Назад к настройкам", textSubColorHex, () =>
+            {
+                dlg.Close();
+                ShowSettingsDialog();
+            }));
+
+            dlg.Content = new Border
+            {
+                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(20),
+                Padding = new Thickness(22, 18, 22, 18),
+                Child = root
+            };
+            dlg.ShowDialog();
+        }
+
+        private void ShowBackupDialog()
+        {
+            var dlg = CreateModalDialog("Бэкап", () => ShowSettingsDialog());
+            var root = new StackPanel();
+            root.Children.Add(CreateDialogHeader("💾 Бэкап и восстановление"));
+
+            root.Children.Add(CreateMenuCard("💾 Сохранить бэкап в файл (.json)", "Полная совместимость с Android-версией", () =>
+            {
+                var sfd = new SaveFileDialog
+                {
+                    FileName = "dns_switcher_backup.json",
+                    Filter = "JSON Files (*.json)|*.json"
+                };
+                if (sfd.ShowDialog() == true)
+                {
+                    string json = JsonSerializer.Serialize(serverList, new JsonSerializerOptions { WriteIndented = true });
+                    File.WriteAllText(sfd.FileName, json, Encoding.UTF8);
+                }
+                dlg.Close();
+            }));
+
+            root.Children.Add(CreateMenuCard("📂 Загрузить бэкап из файла (.json)", "Импорт серверов с телефона или ПК", () =>
+            {
+                var ofd = new OpenFileDialog
+                {
+                    Filter = "JSON Files (*.json)|*.json|All files (*.*)|*.*"
+                };
+                if (ofd.ShowDialog() == true)
+                {
+                    try
+                    {
+                        string raw = File.ReadAllText(ofd.FileName, Encoding.UTF8);
+                        var imported = JsonSerializer.Deserialize<List<DnsServer>>(raw);
+                        if (imported != null)
+                        {
+                            foreach (var s in imported)
+                            {
+                                if (!string.IsNullOrEmpty(s.host) && !serverList.Any(x => x.host.Equals(s.host, StringComparison.OrdinalIgnoreCase)))
+                                {
+                                    serverList.Add(s);
+                                }
+                            }
+                            SaveConfig();
+                            CheckNetworkAndTestAll();
+                        }
+                    }
+                    catch { }
+                }
+                dlg.Close();
+            }));
+
+            root.Children.Add(CreateMenuCard("🔄 Сбросить к стандартным 7 серверам", "Восстановить базовый список", () =>
+            {
+                serverList = defaultServers.Select(d => new DnsServer { name = d.name, host = d.host }).ToList();
+                SaveConfig();
+                dlg.Close();
+                CheckNetworkAndTestAll();
+            }));
+
+            root.Children.Add(CreateDialogButton("Назад к настройкам", accentColorHex, () =>
+            {
+                dlg.Close();
+                ShowSettingsDialog();
+            }));
+
+            dlg.Content = new Border
+            {
+                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(20),
+                Padding = new Thickness(22, 18, 22, 18),
+                Child = root
+            };
+            dlg.ShowDialog();
+        }
+
+        private void SetupTrayIcon()
+        {
+            trayIcon = new Forms.NotifyIcon
+            {
+                Icon = System.Drawing.SystemIcons.Shield,
+                Visible = true,
+                Text = "DNS Switcher Pro"
+            };
+
+            trayIcon.DoubleClick += (s, e) =>
+            {
+                Show();
+                WindowState = WindowState.Normal;
+                Activate();
+            };
+
+            UpdateTrayMenu();
+        }
+
+        private void UpdateTrayMenu()
+        {
+            var menu = new Forms.ContextMenuStrip();
+            menu.Items.Add("⚡ Открыть DNS Switcher Pro", null, (s, e) =>
+            {
+                Show();
+                WindowState = WindowState.Normal;
+                Activate();
+            });
+            menu.Items.Add(new Forms.ToolStripSeparator());
+
+            foreach (var srv in serverList)
+            {
+                bool isCurrent = config.CurrentMode == "on" &&
+                                 string.Equals(config.LastActiveHost, srv.host, StringComparison.OrdinalIgnoreCase);
+                string prefix = isCurrent ? "✔ " : "    ";
+                menu.Items.Add($"{prefix}{srv.name}", null, (s, e) => ApplyWindowsDnsServer(srv.host));
+            }
+
+            menu.Items.Add(new Forms.ToolStripSeparator());
+            menu.Items.Add("Режим: Авто (DHCP + DoH)", null, (s, e) => ResetWindowsDnsToDhcp(true));
+            menu.Items.Add("Режим: Выкл (Стандартный DHCP)", null, (s, e) => ResetWindowsDnsToDhcp(false));
+            menu.Items.Add(new Forms.ToolStripSeparator());
+            menu.Items.Add("Выход", null, (s, e) =>
+            {
+                trayIcon.Visible = false;
+                Environment.Exit(0);
+            });
+
+            trayIcon.ContextMenuStrip = menu;
+        }
+
+        private void LoadConfig()
+        {
+            if (File.Exists(configPath))
+            {
+                try
+                {
+                    string json = File.ReadAllText(configPath, Encoding.UTF8);
+                    var loaded = JsonSerializer.Deserialize<AppConfig>(json);
+                    if (loaded != null)
+                    {
+                        config = loaded;
+                        serverList = config.Servers ?? new List<DnsServer>();
+                    }
+                }
+                catch { }
+            }
+
+            if (serverList.Count == 0)
+            {
+                serverList = defaultServers.Select(d => new DnsServer { name = d.name, host = d.host }).ToList();
+                SaveConfig();
+            }
+        }
+
+        private void SaveConfig()
+        {
+            try
+            {
+                config.Servers = serverList;
+                string json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(configPath, json, Encoding.UTF8);
+            }
+            catch { }
+        }
+    }
+}
