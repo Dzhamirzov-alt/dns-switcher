@@ -31,6 +31,7 @@ import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.text.InputType
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
@@ -41,6 +42,8 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import org.json.JSONArray
 import org.json.JSONObject
 import rikka.shizuku.Shizuku
@@ -150,6 +153,7 @@ class MainActivity : Activity() {
         }
     }
 
+    private var backCallback: OnBackInvokedCallback? = null
     private var isUpdatingUi = false
 
     // Цветовые палитры и темы
@@ -220,11 +224,34 @@ class MainActivity : Activity() {
         } catch (_: Throwable) {}
         loadServers()
         setupUI()
+        registerSystemBackVibrate()
+    }
+
+    // Регистрация перехватчика кнопки «Назад» для Android 13+ (API 33+)
+    private fun registerSystemBackVibrate() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val callback = OnBackInvokedCallback {
+                vibrateClick()
+                finish()
+            }
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                callback
+            )
+            backCallback = callback
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         uiHandler.removeCallbacks(hideUndoRunnable)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            backCallback?.let {
+                try {
+                    onBackInvokedDispatcher.unregisterOnBackInvokedCallback(it)
+                } catch (_: Exception) {}
+            }
+        }
         try {
             Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener)
         } catch (_: Throwable) {}
@@ -236,8 +263,42 @@ class MainActivity : Activity() {
         checkNetworkAndTestAll()
     }
 
+    // Виброотклик при нажатии системной кнопки «Назад» на Android 12 и ниже
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        vibrateClick()
+        @Suppress("DEPRECATION")
+        super.onBackPressed()
+    }
+
     private fun vibrateClick(strong: Boolean = false) {
         HapticUtil.vibrate(this, strong)
+    }
+
+    // Надёжный перехват кнопки «Назад» и тапа мимо окна для всех диалогов (с сохранением фокуса для вибрации)
+    private fun setupDialogBackHandling(dialog: AlertDialog, onNavigateBack: (() -> Unit)? = null) {
+        var handledByKey = false
+
+        dialog.setOnKeyListener { d, keyCode, event ->
+            if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP && !event.isCanceled) {
+                handledByKey = true
+                // Вибрируем ДО закрытия диалога, пока окно гарантированно держит фокус
+                vibrateClick()
+                d.dismiss()
+                onNavigateBack?.invoke()
+                true
+            } else {
+                false
+            }
+        }
+
+        // Если закрыли тапом мимо окна или системным свайпом, который обошел KeyEvent
+        dialog.setOnCancelListener {
+            if (!handledByKey) {
+                vibrateClick()
+                onNavigateBack?.invoke()
+            }
+        }
     }
 
     private fun loadThemePreferences() {
@@ -739,6 +800,7 @@ class MainActivity : Activity() {
             .setView(rootLayout)
             .create()
 
+        actionDialog?.let { setupDialogBackHandling(it) }
         actionDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
         actionDialog?.show()
     }
@@ -810,11 +872,13 @@ class MainActivity : Activity() {
 
         confirmDialog = AlertDialog.Builder(this)
             .setView(rootLayout)
-            .setOnCancelListener {
-                showServerActionsDialog(index)
-            }
             .create()
 
+        confirmDialog?.let {
+            setupDialogBackHandling(it) {
+                showServerActionsDialog(index)
+            }
+        }
         confirmDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
         confirmDialog?.show()
     }
@@ -930,6 +994,7 @@ class MainActivity : Activity() {
             .setView(rootLayout)
             .create()
 
+        dialogInstance?.let { setupDialogBackHandling(it) }
         dialogInstance?.window?.setBackgroundDrawableResource(android.R.color.transparent)
         dialogInstance?.show()
     }
@@ -983,7 +1048,8 @@ class MainActivity : Activity() {
                             1 -> {
                                 val newLightMode = !isLightMode
                                 saveAndApplyTheme(currentThemeKey, newLightMode)
-                                renderCustomizationOptions()
+                                customDialog?.dismiss()
+                                showCustomizationDialog()
                             }
                             2 -> {
                                 val newSort = !isAutoSortOn
@@ -1061,11 +1127,13 @@ class MainActivity : Activity() {
 
         customDialog = AlertDialog.Builder(this)
             .setView(rootLayout)
-            .setOnCancelListener {
-                showSettingsDialog()
-            }
             .create()
 
+        customDialog?.let {
+            setupDialogBackHandling(it) {
+                showSettingsDialog()
+            }
+        }
         customDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
         customDialog?.show()
     }
@@ -1294,11 +1362,13 @@ class MainActivity : Activity() {
 
         benchDialog = AlertDialog.Builder(this)
             .setView(rootLayout)
-            .setOnCancelListener {
-                showSettingsDialog()
-            }
             .create()
 
+        benchDialog?.let {
+            setupDialogBackHandling(it) {
+                showSettingsDialog()
+            }
+        }
         benchDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
         benchDialog?.show()
     }
@@ -1372,11 +1442,13 @@ class MainActivity : Activity() {
 
         themeDialog = AlertDialog.Builder(this)
             .setView(rootLayout)
-            .setOnCancelListener {
-                showCustomizationDialog()
-            }
             .create()
 
+        themeDialog?.let {
+            setupDialogBackHandling(it) {
+                showCustomizationDialog()
+            }
+        }
         themeDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
         themeDialog?.show()
     }
@@ -1805,12 +1877,14 @@ class MainActivity : Activity() {
 
         editDialog = AlertDialog.Builder(this)
             .setView(rootLayout)
-            .setOnCancelListener {
+            .create()
+
+        editDialog?.let {
+            setupDialogBackHandling(it) {
                 if (returnToSettings) showSettingsDialog()
                 else if (returnToActions && idx >= 0) showServerActionsDialog(idx)
             }
-            .create()
-
+        }
         editDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
         editDialog?.show()
     }
@@ -1927,11 +2001,13 @@ class MainActivity : Activity() {
 
         dialogInstance = AlertDialog.Builder(this)
             .setView(rootLayout)
-            .setOnCancelListener {
-                showSettingsDialog()
-            }
             .create()
 
+        dialogInstance?.let {
+            setupDialogBackHandling(it) {
+                showSettingsDialog()
+            }
+        }
         dialogInstance?.window?.setBackgroundDrawableResource(android.R.color.transparent)
         dialogInstance?.show()
     }
@@ -2124,11 +2200,13 @@ class MainActivity : Activity() {
 
         dialogInstance = AlertDialog.Builder(this)
             .setView(rootLayout)
-            .setOnCancelListener {
-                showSettingsDialog()
-            }
             .create()
 
+        dialogInstance?.let {
+            setupDialogBackHandling(it) {
+                showSettingsDialog()
+            }
+        }
         dialogInstance?.window?.setBackgroundDrawableResource(android.R.color.transparent)
         dialogInstance?.show()
     }
@@ -2242,6 +2320,7 @@ class MainActivity : Activity() {
             .setView(rootLayout)
             .create()
 
+        dialogInstance?.let { setupDialogBackHandling(it) }
         dialogInstance?.window?.setBackgroundDrawableResource(android.R.color.transparent)
         dialogInstance?.show()
     }
@@ -2396,11 +2475,13 @@ class MainActivity : Activity() {
 
         guideDialog = AlertDialog.Builder(this)
             .setView(rootLayout)
-            .setOnCancelListener {
-                showAdbDialog()
-            }
             .create()
 
+        guideDialog?.let {
+            setupDialogBackHandling(it) {
+                showAdbDialog()
+            }
+        }
         guideDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
         guideDialog?.show()
     }
