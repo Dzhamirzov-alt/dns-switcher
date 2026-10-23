@@ -1,4 +1,4 @@
-name: Build Android APK & Windows EXE
+name: Build Android APK & Windows Installer
 
 on:
   push:
@@ -33,7 +33,7 @@ jobs:
           name: DNS-Switcher-Pro-Android-APK
           path: app/build/outputs/apk/debug/app-debug.apk
 
-  # Поток 2: Сборка Windows-версии (.exe) из папки windows/
+  # Поток 2: Сборка Windows-установщика (DNS_Switcher_Pro_Setup.exe)
   build-windows:
     runs-on: windows-latest
     steps:
@@ -45,12 +45,61 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Publish Standalone Single-File EXE
+      - name: Generate Cyberpunk Shield Icon (icon.ico)
+        working-directory: ./windows
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          $bmp = New-Object System.Drawing.Bitmap(256, 256)
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+          $g.Clear([System.Drawing.Color]::Transparent)
+
+          $bgBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 12, 15, 20))
+          $neonPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(255, 0, 230, 118), 14)
+          $neonPen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+
+          $pts = [System.Drawing.PointF[]]@(
+            (New-Object System.Drawing.PointF(128, 18)),
+            (New-Object System.Drawing.PointF(222, 54)),
+            (New-Object System.Drawing.PointF(222, 136)),
+            (New-Object System.Drawing.PointF(128, 236)),
+            (New-Object System.Drawing.PointF(34, 136)),
+            (New-Object System.Drawing.PointF(34, 54))
+          )
+          $g.FillPolygon($bgBrush, $pts)
+          $g.DrawPolygon($neonPen, $pts)
+
+          $lockPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(255, 0, 230, 118), 10)
+          $g.DrawArc($lockPen, 98, 76, 60, 60, 180, 180)
+          $g.DrawRectangle($lockPen, 88, 110, 80, 64)
+          $g.Dispose()
+
+          $msPng = New-Object System.IO.MemoryStream
+          $bmp.Save($msPng, [System.Drawing.Imaging.ImageFormat]::Png)
+          $pngBytes = $msPng.ToArray()
+
+          $fs = [System.IO.File]::OpenWrite("$PWD\icon.ico")
+          $bw = New-Object System.IO.BinaryWriter($fs)
+          $bw.Write([uint16]0); $bw.Write([uint16]1); $bw.Write([uint16]1)
+          $bw.Write([byte]0); $bw.Write([byte]0); $bw.Write([byte]0); $bw.Write([byte]0)
+          $bw.Write([uint16]1); $bw.Write([uint16]32)
+          $bw.Write([uint32]$pngBytes.Length)
+          $bw.Write([uint32]22)
+          $bw.Write($pngBytes)
+          $bw.Close()
+          $fs.Close()
+
+      - name: Publish Standalone EXE
         working-directory: ./windows
         run: dotnet publish DnsSwitcherPro.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o ./publish
 
-      - name: Upload Windows EXE
+      - name: Compile Windows Installer (Inno Setup)
+        working-directory: ./windows
+        run: iscc installer.iss
+
+      - name: Upload Windows Setup Installer
         uses: actions/upload-artifact@v4
         with:
-          name: DNS-Switcher-Pro-Windows-EXE
-          path: windows/publish/DNS_Switcher_Pro.exe
+          name: DNS-Switcher-Pro-Windows-Installer
+          path: windows/installer_out/DNS_Switcher_Pro_Setup.exe
