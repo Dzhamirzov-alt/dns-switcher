@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -12,10 +14,18 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using Forms = System.Windows.Forms;
+using MediaBrush = System.Windows.Media.Brush;
+using MediaBrushes = System.Windows.Media.Brushes;
+using MediaColor = System.Windows.Media.Color;
+using MediaColorConverter = System.Windows.Media.ColorConverter;
+using MediaFontFamily = System.Windows.Media.FontFamily;
+using MediaPen = System.Windows.Media.Pen;
 
 namespace DnsSwitcherPro
 {
@@ -32,6 +42,8 @@ namespace DnsSwitcherPro
         public bool LightMode { get; set; } = false;
         public bool AutoSortPing { get; set; } = true;
         public bool EnableDohEncryption { get; set; } = true;
+        public bool StartWithWindows { get; set; } = true;
+        public bool FirstRunCompleted { get; set; } = false;
         public string CurrentMode { get; set; } = "off"; // "off", "auto", "on"
         public string LastActiveHost { get; set; } = "dns.comss.one";
         public List<DnsServer> Servers { get; set; } = new();
@@ -40,10 +52,11 @@ namespace DnsSwitcherPro
     public class Program
     {
         [STAThread]
-        public static void Main()
+        public static void Main(string[] args)
         {
+            bool startMinimized = args.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase));
             var app = new Application();
-            var mainWindow = new MainWindow();
+            var mainWindow = new MainWindow(startMinimized);
             app.Run(mainWindow);
         }
     }
@@ -52,7 +65,9 @@ namespace DnsSwitcherPro
     {
         private AppConfig config = new();
         private readonly string configPath;
+        private readonly bool launchMinimized;
         private List<DnsServer> serverList = new();
+        private const string AutoStartTaskName = "DnsSwitcherProAutoStart";
 
         // Элементы интерфейса
         private ScrollViewer rootScroll = null!;
@@ -67,6 +82,7 @@ namespace DnsSwitcherPro
         private RadioButton rbOn = null!;
         private TextBlock titleApp = null!;
         private Border settingsBtn = null!;
+        private TextBlock settingsGearText = null!;
         private TextBlock listHeader = null!;
         private Border pingBtnBorder = null!;
         private TextBlock pingBtnText = null!;
@@ -83,16 +99,17 @@ namespace DnsSwitcherPro
         private Forms.NotifyIcon trayIcon = null!;
         private bool isUpdatingUi = false;
 
-        // Цвета темы
+        // Цвета темы (приглушенный серо-серебристый вместо резкого белого)
         private string accentColorHex = "#00E676";
         private string accentCardBgHex = "#0D2318";
         private string bgRootHex = "#08080A";
         private string bgCardHex = "#121418";
         private string bgCardStrokeHex = "#1E222B";
-        private string textMainColorHex = "#FFFFFF";
-        private string textSubColorHex = "#90A4AE";
+        private string textMainColorHex = "#CBD5E1"; // Мягкий светло-серый вместо ярко-белого
+        private string textSubColorHex = "#8A99AD";
+        private string gearIconColorHex = "#E2E8F0"; // Светлая заметная шестеренка
+        private string gearBgHex = "#1E2430";
 
-        // Резервные IPv4-адреса популярных DNS-серверов
         private readonly Dictionary<string, string[]> knownIps = new(StringComparer.OrdinalIgnoreCase)
         {
             { "dns.comss.one", new[] { "83.220.169.155", "212.109.195.93" } },
@@ -142,8 +159,9 @@ namespace DnsSwitcherPro
             new DnsServer { name = "Quad9", host = "dns.quad9.net" }
         };
 
-        public MainWindow()
+        public MainWindow(bool startMinimized)
         {
+            launchMinimized = startMinimized;
             string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             string dir = Path.Combine(appData, "DnsSwitcherPro");
             Directory.CreateDirectory(dir);
@@ -158,8 +176,17 @@ namespace DnsSwitcherPro
 
             LoadConfig();
             ApplyThemePalette();
+            ApplyCustomWindowAndTrayIcon();
             SetupUI();
             SetupTrayIcon();
+
+            // При первом запуске синхронизируем автозагрузку Windows
+            if (!config.FirstRunCompleted)
+            {
+                config.FirstRunCompleted = true;
+                SetAutoStartTask(config.StartWithWindows);
+                SaveConfig();
+            }
 
             undoTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
             undoTimer.Tick += (s, e) =>
@@ -173,22 +200,116 @@ namespace DnsSwitcherPro
                 DetectInitialSystemMode();
                 RefreshSystemState();
                 CheckNetworkAndTestAll();
+
+                if (launchMinimized)
+                {
+                    Hide();
+                }
             };
 
             Closing += (s, e) =>
             {
                 e.Cancel = true;
                 Hide();
-                trayIcon.ShowBalloonTip(1500, "DNS Switcher Pro", "Свёрнуто в трей. Правый клик по иконке — быстрое переключение DNS.", Forms.ToolTipIcon.Info);
+                trayIcon.ShowBalloonTip(1500, "DNS Switcher Pro", "Приложение работает в фоне. Правый клик по иконке — быстрое переключение DNS.", Forms.ToolTipIcon.Info);
             };
         }
 
-        private Brush BrushFromHex(string hex)
+        // Программная отрисовка фирменной неоновой иконки щита для окна и системного трея
+        private Icon CreateCyberShieldIcon()
+        {
+            using var bmp = new Bitmap(64, 64);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear( System.Drawing.Color.FromArgb(10, 12, 16));
+
+                var neonColor = ColorTranslator.FromHtml(accentColorHex);
+                using var bgBrush = new SolidBrush(System.Drawing.Color.FromArgb(22, 26, 34));
+                using var neonPen = new System.Drawing.Pen(neonColor, 4f) { LineJoin = LineJoin.Round };
+
+                var shieldPts = new System.Drawing.PointF[]
+                {
+                    new(32, 6),
+                    new(54, 15),
+                    new(54, 34),
+                    new(32, 58),
+                    new(10, 34),
+                    new(10, 15)
+                };
+
+                g.FillPolygon(bgBrush, shieldPts);
+                g.DrawPolygon(neonPen, shieldPts);
+
+                // Замок по центру щита
+                using var lockPen = new System.Drawing.Pen(neonColor, 3f);
+                g.DrawArc(lockPen, 25, 19, 14, 14, 180, 180);
+                g.DrawRectangle(lockPen, 22, 27, 20, 15);
+            }
+            return System.Drawing.Icon.FromHandle(bmp.GetHicon());
+        }
+
+        private void ApplyCustomWindowAndTrayIcon()
+        {
+            try
+            {
+                using var sysIcon = CreateCyberShieldIcon();
+                Icon = Imaging.CreateBitmapSourceFromHIcon(
+                    sysIcon.Handle,
+                    Int32Rect.Empty,
+                    BitmapSizeOptions.FromEmptyOptions());
+                if (trayIcon != null)
+                {
+                    trayIcon.Icon = CreateCyberShieldIcon();
+                }
+            }
+            catch { }
+        }
+
+        // Управление автозапуском с правами Администратора через Планировщик задач Windows
+        private bool IsAutoStartEnabled()
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("schtasks.exe", $"/Query /TN \"{AutoStartTaskName}\"")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                using var p = Process.Start(psi);
+                p?.WaitForExit(2000);
+                return p?.ExitCode == 0;
+            }
+            catch { return false; }
+        }
+
+        private void SetAutoStartTask(bool enable)
+        {
+            try
+            {
+                string exePath = Process.GetCurrentProcess().MainModule?.FileName ?? "";
+                if (string.IsNullOrEmpty(exePath)) return;
+
+                if (enable)
+                {
+                    RunCommand($"schtasks /Create /TN \"{AutoStartTaskName}\" /TR \"\\\"{exePath}\\\" --minimized\" /SC ONLOGON /RL HIGHEST /F");
+                }
+                else
+                {
+                    RunCommand($"schtasks /Delete /TN \"{AutoStartTaskName}\" /F");
+                }
+                config.StartWithWindows = enable;
+                SaveConfig();
+            }
+            catch { }
+        }
+
+        private MediaBrush BrushFromHex(string hex)
         {
             return (SolidColorBrush)new BrushConverter().ConvertFromString(hex)!;
         }
 
-        // Векторный контур щита (серый в неактивном виде, залитый цветом темы в активном)
         private UIElement CreateShieldIcon(string colorHex, bool isFilled)
         {
             return new System.Windows.Shapes.Path
@@ -199,7 +320,7 @@ namespace DnsSwitcherPro
                 Data = Geometry.Parse("M 12,2 L 21,6 L 21,13 C 21,18.5 17.2,23.2 12,24.5 C 6.8,23.2 3,18.5 3,13 L 3,6 Z"),
                 Stroke = BrushFromHex(colorHex),
                 StrokeThickness = 2.0,
-                Fill = isFilled ? BrushFromHex(colorHex) : Brushes.Transparent,
+                Fill = isFilled ? BrushFromHex(colorHex) : MediaBrushes.Transparent,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 14, 0)
             };
@@ -232,21 +353,27 @@ namespace DnsSwitcherPro
                 VerticalAlignment = VerticalAlignment.Center
             };
 
+            // Векторный символ шестеренки (\u2699\uFE0E) без принудительного серого эмодзи-слоя Windows
+            settingsGearText = new TextBlock
+            {
+                Text = "\u2699\uFE0E",
+                FontFamily = new MediaFontFamily("Segoe UI Symbol"),
+                FontSize = 20,
+                FontWeight = FontWeights.Bold,
+                Foreground = BrushFromHex(gearIconColorHex),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
             settingsBtn = new Border
             {
-                Background = BrushFromHex(bgCardHex),
-                BorderBrush = BrushFromHex(bgCardStrokeHex),
-                BorderThickness = new Thickness(1.5),
+                Background = BrushFromHex(gearBgHex),
+                BorderBrush = BrushFromHex(accentColorHex),
+                BorderThickness = new Thickness(1.2),
                 CornerRadius = new CornerRadius(12),
-                Padding = new Thickness(12, 6, 12, 6),
+                Padding = new Thickness(12, 5, 12, 6),
                 Cursor = Cursors.Hand,
-                Child = new TextBlock
-                {
-                    Text = "⚙️",
-                    FontSize = 18,
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Center
-                }
+                Child = settingsGearText
             };
             settingsBtn.MouseLeftButtonUp += (s, e) => ShowSettingsDialog();
 
@@ -490,27 +617,33 @@ namespace DnsSwitcherPro
             {
                 bgRootHex = "#F4F5F7";
                 bgCardHex = "#FFFFFF";
-                bgCardStrokeHex = "#E0E0E0";
-                textMainColorHex = "#121212";
-                textSubColorHex = "#546E7A";
+                bgCardStrokeHex = "#D8DEE9";
+                textMainColorHex = "#334155"; // Мягкий темно-серый для светлой темы
+                textSubColorHex = "#64748B";
+                gearIconColorHex = "#334155";
+                gearBgHex = "#E2E8F0";
             }
             else
             {
                 bgRootHex = "#08080A";
                 bgCardHex = "#121418";
                 bgCardStrokeHex = "#1E222B";
-                textMainColorHex = "#FFFFFF";
-                textSubColorHex = "#90A4AE";
+                textMainColorHex = "#CBD5E1"; // Приглушенный серо-серебристый вместо слепящего белого
+                textSubColorHex = "#8A99AD";
+                gearIconColorHex = "#F1F5F9"; // Светлая контрастная шестеренка
+                gearBgHex = "#1E2430";
             }
         }
 
         private void UpdateUIColors()
         {
             ApplyThemePalette();
+            ApplyCustomWindowAndTrayIcon();
             rootScroll.Background = BrushFromHex(bgRootHex);
             titleApp.Foreground = BrushFromHex(accentColorHex);
-            settingsBtn.Background = BrushFromHex(bgCardHex);
-            settingsBtn.BorderBrush = BrushFromHex(bgCardStrokeHex);
+            settingsBtn.Background = BrushFromHex(gearBgHex);
+            settingsBtn.BorderBrush = BrushFromHex(accentColorHex);
+            settingsGearText.Foreground = BrushFromHex(gearIconColorHex);
             netStatusBorder.Background = BrushFromHex(bgCardHex);
             netStatusBorder.BorderBrush = BrushFromHex(bgCardStrokeHex);
             netStatusText.Foreground = BrushFromHex(textSubColorHex);
@@ -580,17 +713,14 @@ namespace DnsSwitcherPro
             return Array.Empty<string>();
         }
 
-        // Регистрация шаблона DoH и принудительное включение шифрования в реестре Windows 11/10
         private void ConfigureWindowsDohForServer(string ifaceGuid, string host, string[] ips)
         {
             string dohTemplate = $"https://{host}/dns-query";
 
             foreach (var ip in ips)
             {
-                // 1. Добавляем шаблон DoH в системный список Windows через netsh (Windows 11)
                 RunCommand($"netsh dns add encryption server={ip} dohtemplate={dohTemplate} autoupgrade=yes udpfallback=no");
 
-                // 2. Дублируем регистрацию через системный реестр DohWellKnownServers и интерфесный ключ Doh
                 try
                 {
                     using var wellKnownKey = Registry.LocalMachine.CreateSubKey(
@@ -669,7 +799,6 @@ namespace DnsSwitcherPro
 
                 if (enableAutoEncryption)
                 {
-                    // В режиме «Авто» включаем автоматический апгрейд известных DNS до DoH
                     var currentDns = nic.GetIPProperties().DnsAddresses
                         .Where(ip => ip.AddressFamily == AddressFamily.InterNetwork)
                         .Select(ip => ip.ToString());
@@ -779,13 +908,11 @@ namespace DnsSwitcherPro
                 cardGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
                 cardGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-                // 1. Векторный контур щита по центру
                 string shieldColor = isSelected ? accentColorHex : textSubColorHex;
                 var shieldIcon = CreateShieldIcon(shieldColor, isSelected);
                 Grid.SetColumn(shieldIcon, 0);
                 cardGrid.Children.Add(shieldIcon);
 
-                // 2. Информация о сервере
                 var infoStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
                 var nameRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
 
@@ -793,8 +920,8 @@ namespace DnsSwitcherPro
                 {
                     Text = server.name,
                     FontSize = 15,
-                    FontWeight = FontWeights.Bold,
-                    Foreground = BrushFromHex(textMainColorHex),
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = BrushFromHex(textMainColorHex), // Приглушенный серо-серебристый цвет
                     VerticalAlignment = VerticalAlignment.Center
                 };
                 nameRow.Children.Add(nameTv);
@@ -841,7 +968,6 @@ namespace DnsSwitcherPro
                 Grid.SetColumn(infoStack, 1);
                 cardGrid.Children.Add(infoStack);
 
-                // 3. Кнопка ⋮
                 var moreBtn = new Border
                 {
                     Width = 36,
@@ -996,7 +1122,7 @@ namespace DnsSwitcherPro
                 ResizeMode = ResizeMode.NoResize,
                 WindowStyle = WindowStyle.None,
                 AllowsTransparency = true,
-                Background = Brushes.Transparent
+                Background = MediaBrushes.Transparent
             };
 
             win.PreviewKeyDown += (s, e) =>
@@ -1018,7 +1144,7 @@ namespace DnsSwitcherPro
             {
                 Text = text,
                 FontSize = 17,
-                FontWeight = FontWeights.Bold,
+                FontWeight = FontWeights.SemiBold,
                 Foreground = BrushFromHex(textMainColorHex),
                 HorizontalAlignment = HorizontalAlignment.Center,
                 Margin = new Thickness(8, 4, 8, 18)
@@ -1032,8 +1158,8 @@ namespace DnsSwitcherPro
             {
                 Text = title,
                 FontSize = 14,
-                FontWeight = FontWeights.Bold,
-                Foreground = BrushFromHex(customTitleColor ?? textMainColorHex)
+                FontWeight = FontWeights.SemiBold,
+                Foreground = BrushFromHex(customTitleColor ?? textMainColorHex) // Приглушенный серо-серебристый для заголовков меню
             });
             stack.Children.Add(new TextBlock
             {
@@ -1112,7 +1238,7 @@ namespace DnsSwitcherPro
                 ShowBackupDialog();
             }));
 
-            root.Children.Add(CreateMenuCard("✨ Кастомизация", "Тема, DoH-шифрование, светлый/темный режим", () =>
+            root.Children.Add(CreateMenuCard("✨ Кастомизация и автозапуск", "Тема, автозапуск с ПК, DoH-шифрование", () =>
             {
                 dlg.Close();
                 ShowCustomizationDialog();
@@ -1218,6 +1344,16 @@ namespace DnsSwitcherPro
             var dlg = CreateModalDialog("Кастомизация", () => ShowSettingsDialog());
             var root = new StackPanel();
             root.Children.Add(CreateDialogHeader("✨ Кастомизация"));
+
+            bool autoStartActive = IsAutoStartEnabled();
+
+            root.Children.Add(CreateMenuCard("🚀 Автозапуск вместе с Windows",
+                autoStartActive ? "Сейчас: Включен (автостарт в трей при входе в ПК)" : "Сейчас: Отключен", () =>
+            {
+                SetAutoStartTask(!autoStartActive);
+                dlg.Close();
+                ShowCustomizationDialog();
+            }));
 
             root.Children.Add(CreateMenuCard("🎨 Выбор темы и акцента", "Зеленый, Синий, Фиолетовый, Янтарный", () =>
             {
@@ -1591,7 +1727,7 @@ namespace DnsSwitcherPro
         {
             trayIcon = new Forms.NotifyIcon
             {
-                Icon = System.Drawing.SystemIcons.Shield,
+                Icon = CreateCyberShieldIcon(),
                 Visible = true,
                 Text = "DNS Switcher Pro"
             };
