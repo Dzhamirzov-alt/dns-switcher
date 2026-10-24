@@ -22,10 +22,7 @@ using Microsoft.Win32;
 using Forms = System.Windows.Forms;
 using MediaBrush = System.Windows.Media.Brush;
 using MediaBrushes = System.Windows.Media.Brushes;
-using MediaColor = System.Windows.Media.Color;
-using MediaColorConverter = System.Windows.Media.ColorConverter;
 using MediaFontFamily = System.Windows.Media.FontFamily;
-using MediaPen = System.Windows.Media.Pen;
 
 namespace DnsSwitcherPro
 {
@@ -42,6 +39,7 @@ namespace DnsSwitcherPro
         public bool LightMode { get; set; } = false;
         public bool AutoSortPing { get; set; } = true;
         public bool EnableDohEncryption { get; set; } = true;
+        public bool BlockIpv6 { get; set; } = true; // Блокировка IPv6 включена по умолчанию
         public bool StartWithWindows { get; set; } = true;
         public bool FirstRunCompleted { get; set; } = false;
         public string CurrentMode { get; set; } = "off"; // "off", "auto", "on"
@@ -69,6 +67,10 @@ namespace DnsSwitcherPro
         private List<DnsServer> serverList = new();
         private const string AutoStartTaskName = "DnsSwitcherProAutoStart";
 
+        // Маркеры для управления доступом к Gemini в системном файле hosts
+        private const string HostsBlockStartMarker = "# >>> DNS_SWITCHER_PRO_GEMINI_GUARD_START >>>";
+        private const string HostsBlockEndMarker = "# <<< DNS_SWITCHER_PRO_GEMINI_GUARD_END <<<";
+
         // Элементы интерфейса
         private ScrollViewer rootScroll = null!;
         private StackPanel mainLayout = null!;
@@ -95,19 +97,24 @@ namespace DnsSwitcherPro
         private int lastDeletedIndex = -1;
         private DispatcherTimer undoTimer = null!;
 
+        // Таймер-сторож блокировки Gemini при активном IPv6
+        private DispatcherTimer ipv6GuardTimer = null!;
+        private DateTime lastGeminiBlockNotify = DateTime.MinValue;
+        private bool lastKnownHostsBlockState = false;
+
         // Системный трей
         private Forms.NotifyIcon trayIcon = null!;
         private bool isUpdatingUi = false;
 
-        // Цвета темы (приглушенный серо-серебристый вместо резкого белого)
+        // Цвета темы
         private string accentColorHex = "#00E676";
         private string accentCardBgHex = "#0D2318";
         private string bgRootHex = "#08080A";
         private string bgCardHex = "#121418";
         private string bgCardStrokeHex = "#1E222B";
-        private string textMainColorHex = "#CBD5E1"; // Мягкий светло-серый вместо ярко-белого
+        private string textMainColorHex = "#CBD5E1";
         private string textSubColorHex = "#8A99AD";
-        private string gearIconColorHex = "#E2E8F0"; // Светлая заметная шестеренка
+        private string gearIconColorHex = "#F1F5F9";
         private string gearBgHex = "#1E2430";
 
         private readonly Dictionary<string, string[]> knownIps = new(StringComparer.OrdinalIgnoreCase)
@@ -167,11 +174,12 @@ namespace DnsSwitcherPro
             Directory.CreateDirectory(dir);
             configPath = Path.Combine(dir, "config.json");
 
+            // Автоматический размер окна ровно под содержимое без полосы прокрутки
             Title = "DNS Switcher Pro";
             Width = 435;
-            Height = 770;
-            MinWidth = 395;
-            MinHeight = 600;
+            SizeToContent = SizeToContent.Height;
+            MaxHeight = SystemParameters.WorkArea.Height - 24;
+            ResizeMode = ResizeMode.CanMinimize;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
 
             LoadConfig();
@@ -180,7 +188,6 @@ namespace DnsSwitcherPro
             SetupUI();
             SetupTrayIcon();
 
-            // При первом запуске синхронизируем автозагрузку Windows
             if (!config.FirstRunCompleted)
             {
                 config.FirstRunCompleted = true;
@@ -195,8 +202,14 @@ namespace DnsSwitcherPro
                 undoTimer.Stop();
             };
 
-            Loaded += (s, e) =>
+            // Запуск сторожа, блокирующего приложение и сайт Gemini при активном IPv6
+            ipv6GuardTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
+            ipv6GuardTimer.Tick += (s, e) => EnforceGeminiIpv6Guard();
+            ipv6GuardTimer.Start();
+
+            Loaded += async (s, e) =>
             {
+                await Task.Run(() => EnforceIpv6Policy());
                 DetectInitialSystemMode();
                 RefreshSystemState();
                 CheckNetworkAndTestAll();
@@ -215,14 +228,211 @@ namespace DnsSwitcherPro
             };
         }
 
-        // Программная отрисовка фирменной неоновой иконки щита для окна и системного трея
+        // Проверка: активен ли сейчас протокол IPv6 в настройках или на сетевой карте
+        private bool IsIpv6CurrentlyEnabled()
+        {
+            if (!config.BlockIpv6) return true;
+
+            try
+            {
+                var nic = GetActiveNetworkInterface();
+                if (nic != null && nic.Supports(NetworkInterfaceComponent.IPv6))
+                {
+                    var ipProps = nic.GetIPProperties();
+                    bool hasGlobalIpv6 = ipProps.UnicastAddresses.Any(u =>
+                        u.Address.AddressFamily == AddressFamily.InterNetworkV6 &&
+                        !u.Address.IsIPv6LinkLocal &&
+                        !IPAddress.IsLoopback(u.Address));
+                    if (hasGlobalIpv6) return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        // Блокировка сайта Gemini в файле hosts и закрытие приложения Gemini при включенном IPv6
+        private void EnforceGeminiIpv6Guard()
+        {
+            bool ipv6Enabled = IsIpv6CurrentlyEnabled();
+
+            // Обновляем правила в hosts при изменении статуса IPv6
+            if (ipv6Enabled != lastKnownHostsBlockState)
+            {
+                UpdateGeminiHostsRule(blockCompletely: ipv6Enabled);
+                lastKnownHostsBlockState = ipv6Enabled;
+            }
+
+            if (!ipv6Enabled) return;
+
+            // Если IPv6 включен — не даем запуститься ни приложению Gemini, ни вкладке/PWA Gemini
+            try
+            {
+                foreach (var proc in Process.GetProcesses())
+                {
+                    try
+                    {
+                        string pName = proc.ProcessName;
+                        string wTitle = proc.MainWindowTitle ?? "";
+
+                        bool isGeminiProcess = pName.Equals("Gemini", StringComparison.OrdinalIgnoreCase) ||
+                                               pName.Equals("GoogleGemini", StringComparison.OrdinalIgnoreCase) ||
+                                               pName.Equals("GeminiApp", StringComparison.OrdinalIgnoreCase);
+
+                        bool isGeminiWindow = !string.IsNullOrEmpty(wTitle) &&
+                                              (wTitle.Equals("Gemini", StringComparison.OrdinalIgnoreCase) ||
+                                               wTitle.StartsWith("Gemini -", StringComparison.OrdinalIgnoreCase) ||
+                                               wTitle.StartsWith("Gemini —", StringComparison.OrdinalIgnoreCase) ||
+                                               wTitle.Contains("Google Gemini", StringComparison.OrdinalIgnoreCase) ||
+                                               wTitle.Contains("gemini.google.com", StringComparison.OrdinalIgnoreCase));
+
+                        if (isGeminiProcess)
+                        {
+                            proc.Kill();
+                            NotifyGeminiBlocked();
+                        }
+                        else if (isGeminiWindow)
+                        {
+                            proc.CloseMainWindow();
+                            NotifyGeminiBlocked();
+                        }
+                    }
+                    catch { }
+                    finally
+                    {
+                        proc.Dispose();
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void NotifyGeminiBlocked()
+        {
+            if ((DateTime.Now - lastGeminiBlockNotify).TotalSeconds < 6) return;
+            lastGeminiBlockNotify = DateTime.Now;
+
+            trayIcon?.ShowBalloonTip(
+                2500,
+                "🚫 Gemini заблокирован (Включён IPv6)",
+                "При включённом IPv6 приложение и сайт Gemini заблокированы. Включите блокировку IPv6 (IPv4 Only) в настройках.",
+                Forms.ToolTipIcon.Warning);
+        }
+
+        // Запись правил в системный файл C:\Windows\System32\drivers\etc\hosts
+        private void UpdateGeminiHostsRule(bool blockCompletely)
+        {
+            try
+            {
+                string hostsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"drivers\etc\hosts");
+                if (!File.Exists(hostsPath)) return;
+
+                var lines = File.ReadAllLines(hostsPath, Encoding.UTF8).ToList();
+                var cleaned = new List<string>();
+                bool insideBlock = false;
+
+                foreach (var line in lines)
+                {
+                    if (line.Trim() == HostsBlockStartMarker)
+                    {
+                        insideBlock = true;
+                        continue;
+                    }
+                    if (line.Trim() == HostsBlockEndMarker)
+                    {
+                        insideBlock = false;
+                        continue;
+                    }
+                    if (!insideBlock)
+                    {
+                        cleaned.Add(line);
+                    }
+                }
+
+                cleaned.Add(HostsBlockStartMarker);
+                if (blockCompletely)
+                {
+                    // Полная блокировка сайта и веб-приложения Gemini при включенном IPv6
+                    cleaned.Add("0.0.0.0 gemini.google.com");
+                    cleaned.Add("0.0.0.0 www.gemini.google.com");
+                    cleaned.Add("0.0.0.0 aistudio.google.com");
+                    cleaned.Add("::1 gemini.google.com");
+                    cleaned.Add("::1 www.gemini.google.com");
+                    cleaned.Add("::1 aistudio.google.com");
+                }
+                else
+                {
+                    // В режиме IPv4 Only блокируем только IPv6-резолвинг для Gemini, разрешая IPv4
+                    cleaned.Add("::1 gemini.google.com");
+                    cleaned.Add("::1 www.gemini.google.com");
+                }
+                cleaned.Add(HostsBlockEndMarker);
+
+                File.WriteAllLines(hostsPath, cleaned, Encoding.UTF8);
+                RunCommand("ipconfig /flushdns");
+            }
+            catch { }
+        }
+
+        // Блокировка IPv6 и разрешение трафика и DNS-запросов строго по IPv4
+        private void EnforceIpv6Policy()
+        {
+            var nic = GetActiveNetworkInterface();
+            string? ifaceName = nic?.Name;
+
+            if (config.BlockIpv6)
+            {
+                if (!string.IsNullOrEmpty(ifaceName))
+                {
+                    RunCommand($"netsh interface ipv6 set dnsservers name=\"{ifaceName}\" static ::1 primary validate=no");
+                    RunPowerShell($"Disable-NetAdapterBinding -Name '{ifaceName.Replace("'", "''")}' -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue");
+                }
+
+                RunCommand("netsh interface teredo set state disabled");
+                RunCommand("netsh interface ipv6 6to4 set state state=disabled");
+                RunCommand("netsh interface ipv6 isatap set state state=disabled");
+
+                try
+                {
+                    using var tcp6Key = Registry.LocalMachine.CreateSubKey(
+                        @"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters", true);
+                    tcp6Key?.SetValue("DisabledComponents", 0x20, RegistryValueKind.DWord);
+                }
+                catch { }
+
+                UpdateGeminiHostsRule(blockCompletely: false);
+                lastKnownHostsBlockState = false;
+            }
+            else
+            {
+                if (!string.IsNullOrEmpty(ifaceName))
+                {
+                    RunPowerShell($"Enable-NetAdapterBinding -Name '{ifaceName.Replace("'", "''")}' -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue");
+                    RunCommand($"netsh interface ipv6 set dnsservers name=\"{ifaceName}\" source=dhcp");
+                }
+
+                try
+                {
+                    using var tcp6Key = Registry.LocalMachine.CreateSubKey(
+                        @"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters", true);
+                    tcp6Key?.SetValue("DisabledComponents", 0x0, RegistryValueKind.DWord);
+                }
+                catch { }
+
+                // При включении IPv6 сразу блокируем сайт и приложение Gemini
+                UpdateGeminiHostsRule(blockCompletely: true);
+                lastKnownHostsBlockState = true;
+                Dispatcher.Invoke(EnforceGeminiIpv6Guard);
+            }
+        }
+
         private Icon CreateCyberShieldIcon()
         {
             using var bmp = new Bitmap(64, 64);
             using (var g = Graphics.FromImage(bmp))
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.Clear( System.Drawing.Color.FromArgb(10, 12, 16));
+                g.Clear(System.Drawing.Color.FromArgb(10, 12, 16));
 
                 var neonColor = ColorTranslator.FromHtml(accentColorHex);
                 using var bgBrush = new SolidBrush(System.Drawing.Color.FromArgb(22, 26, 34));
@@ -241,7 +451,6 @@ namespace DnsSwitcherPro
                 g.FillPolygon(bgBrush, shieldPts);
                 g.DrawPolygon(neonPen, shieldPts);
 
-                // Замок по центру щита
                 using var lockPen = new System.Drawing.Pen(neonColor, 3f);
                 g.DrawArc(lockPen, 25, 19, 14, 14, 180, 180);
                 g.DrawRectangle(lockPen, 22, 27, 20, 15);
@@ -266,7 +475,6 @@ namespace DnsSwitcherPro
             catch { }
         }
 
-        // Управление автозапуском с правами Администратора через Планировщик задач Windows
         private bool IsAutoStartEnabled()
         {
             try
@@ -328,15 +536,17 @@ namespace DnsSwitcherPro
 
         private void SetupUI()
         {
+            // Ползунок прокрутки по правому краю полностью отключен (Hidden)
             rootScroll = new ScrollViewer
             {
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
                 Background = BrushFromHex(bgRootHex)
             };
 
             mainLayout = new StackPanel
             {
-                Margin = new Thickness(20, 20, 20, 24)
+                Margin = new Thickness(20, 20, 20, 20)
             };
 
             // Шапка
@@ -353,7 +563,6 @@ namespace DnsSwitcherPro
                 VerticalAlignment = VerticalAlignment.Center
             };
 
-            // Векторный символ шестеренки (\u2699\uFE0E) без принудительного серого эмодзи-слоя Windows
             settingsGearText = new TextBlock
             {
                 Text = "\u2699\uFE0E",
@@ -618,7 +827,7 @@ namespace DnsSwitcherPro
                 bgRootHex = "#F4F5F7";
                 bgCardHex = "#FFFFFF";
                 bgCardStrokeHex = "#D8DEE9";
-                textMainColorHex = "#334155"; // Мягкий темно-серый для светлой темы
+                textMainColorHex = "#334155";
                 textSubColorHex = "#64748B";
                 gearIconColorHex = "#334155";
                 gearBgHex = "#E2E8F0";
@@ -628,9 +837,9 @@ namespace DnsSwitcherPro
                 bgRootHex = "#08080A";
                 bgCardHex = "#121418";
                 bgCardStrokeHex = "#1E222B";
-                textMainColorHex = "#CBD5E1"; // Приглушенный серо-серебристый вместо слепящего белого
+                textMainColorHex = "#CBD5E1";
                 textSubColorHex = "#8A99AD";
-                gearIconColorHex = "#F1F5F9"; // Светлая контрастная шестеренка
+                gearIconColorHex = "#F1F5F9";
                 gearBgHex = "#1E2430";
             }
         }
@@ -765,6 +974,8 @@ namespace DnsSwitcherPro
             string ifaceName = nic.Name;
             string ifaceGuid = nic.Id;
 
+            EnforceIpv6Policy();
+
             RunCommand($"netsh interface ipv4 set dnsservers name=\"{ifaceName}\" static {ips[0]} primary");
             if (ips.Length > 1)
             {
@@ -794,6 +1005,7 @@ namespace DnsSwitcherPro
             var nic = GetActiveNetworkInterface();
             if (nic != null)
             {
+                EnforceIpv6Policy();
                 RunCommand($"netsh interface ipv4 set dnsservers name=\"{nic.Name}\" source=dhcp");
                 ClearInterfaceDohRegistry(nic.Id);
 
@@ -839,6 +1051,22 @@ namespace DnsSwitcherPro
             catch { }
         }
 
+        private void RunPowerShell(string script)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("powershell.exe", $"-NoProfile -NonInteractive -WindowStyle Hidden -Command \"{script}\"")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                using var p = Process.Start(psi);
+                p?.WaitForExit(3500);
+            }
+            catch { }
+        }
+
         private void RefreshSystemState()
         {
             isUpdatingUi = true;
@@ -850,6 +1078,8 @@ namespace DnsSwitcherPro
             rbOn.Foreground = BrushFromHex(textSubColorHex);
             rbOn.FontWeight = FontWeights.Normal;
 
+            string ipv4Tag = config.BlockIpv6 ? " • IPv4 ONLY" : " • IPv6 ВКЛ (GEMINI БЛОК)";
+
             switch (config.CurrentMode)
             {
                 case "on":
@@ -859,8 +1089,8 @@ namespace DnsSwitcherPro
 
                     modeCard.Background = BrushFromHex(accentCardBgHex);
                     modeCard.BorderBrush = BrushFromHex(accentColorHex);
-                    string dohStatus = config.EnableDohEncryption ? " (DoH ШИФРОВАНИЕ)" : "";
-                    modeTitle.Text = $"СИСТЕМНЫЙ РЕЖИМ: ВКЛЮЧЕН{dohStatus}";
+                    string dohStatus = config.EnableDohEncryption ? " (DoH)" : "";
+                    modeTitle.Text = $"СИСТЕМНЫЙ РЕЖИМ: ВКЛЮЧЕН{dohStatus}{ipv4Tag}";
                     modeTitle.Foreground = BrushFromHex(accentColorHex);
                     break;
 
@@ -871,7 +1101,7 @@ namespace DnsSwitcherPro
 
                     modeCard.Background = BrushFromHex(accentCardBgHex);
                     modeCard.BorderBrush = BrushFromHex(accentColorHex);
-                    modeTitle.Text = "СИСТЕМНЫЙ РЕЖИМ: АВТО";
+                    modeTitle.Text = $"СИСТЕМНЫЙ РЕЖИМ: АВТО{ipv4Tag}";
                     modeTitle.Foreground = BrushFromHex(accentColorHex);
                     break;
 
@@ -882,7 +1112,7 @@ namespace DnsSwitcherPro
 
                     modeCard.Background = BrushFromHex(config.LightMode ? "#FFEBEE" : "#1F1214");
                     modeCard.BorderBrush = BrushFromHex("#FF5252");
-                    modeTitle.Text = "СИСТЕМНЫЙ РЕЖИМ: ОТКЛЮЧЕН";
+                    modeTitle.Text = $"СИСТЕМНЫЙ РЕЖИМ: ОТКЛЮЧЕН{ipv4Tag}";
                     modeTitle.Foreground = BrushFromHex("#FF5252");
                     break;
             }
@@ -921,7 +1151,7 @@ namespace DnsSwitcherPro
                     Text = server.name,
                     FontSize = 15,
                     FontWeight = FontWeights.SemiBold,
-                    Foreground = BrushFromHex(textMainColorHex), // Приглушенный серо-серебристый цвет
+                    Foreground = BrushFromHex(textMainColorHex),
                     VerticalAlignment = VerticalAlignment.Center
                 };
                 nameRow.Children.Add(nameTv);
@@ -1003,7 +1233,7 @@ namespace DnsSwitcherPro
                     BorderThickness = new Thickness(1.5),
                     CornerRadius = new CornerRadius(14),
                     Padding = new Thickness(14, 12, 12, 12),
-                    Margin = new Thickness(0, 0, 0, 9),
+                    Margin = new Thickness(0, 0, 0, i == serverList.Count - 1 ? 0 : 9),
                     Cursor = Cursors.Hand,
                     Child = cardGrid
                 };
@@ -1024,13 +1254,17 @@ namespace DnsSwitcherPro
 
                 listContainer.Children.Add(cardBorder);
             }
+
+            // Пересчитываем высоту окна ровно по содержимому
+            SizeToContent = SizeToContent.Manual;
+            SizeToContent = SizeToContent.Height;
         }
 
         private async void CheckNetworkAndTestAll(bool autoConnectBest = false)
         {
             var nic = GetActiveNetworkInterface();
             string netType = nic != null ? $"{nic.Name} 🌐" : "Нет сети ❌";
-            netStatusText.Text = $"{netType} • Проверка порта 853 и DNS...";
+            netStatusText.Text = $"{netType} • Проверка порта 853 (IPv4)...";
 
             foreach (var s in serverList) s.ping = -2;
             RenderServerList();
@@ -1043,12 +1277,16 @@ namespace DnsSwitcherPro
                     int resultPing = -3;
                     try
                     {
-                        using var client = new TcpClient();
-                        var task = client.ConnectAsync(server.host, 853);
-                        if (task.Wait(2200) && client.Connected)
+                        var ipv4List = ResolveHostToIpv4(server.host);
+                        if (ipv4List.Length > 0 && IPAddress.TryParse(ipv4List[0], out var targetIp))
                         {
-                            sw.Stop();
-                            resultPing = (int)sw.ElapsedMilliseconds;
+                            using var client = new TcpClient(AddressFamily.InterNetwork);
+                            var task = client.ConnectAsync(targetIp, 853);
+                            if (task.Wait(2200) && client.Connected)
+                            {
+                                sw.Stop();
+                                resultPing = (int)sw.ElapsedMilliseconds;
+                            }
                         }
                     }
                     catch
@@ -1063,8 +1301,10 @@ namespace DnsSwitcherPro
             {
                 try
                 {
-                    var res = Dns.GetHostAddresses("google.com");
-                    return res != null && res.Length > 0;
+                    var res = Dns.GetHostAddresses("google.com")
+                        .Where(ip => ip.AddressFamily == AddressFamily.InterNetwork)
+                        .ToArray();
+                    return res.Length > 0;
                 }
                 catch { return false; }
             });
@@ -1076,7 +1316,7 @@ namespace DnsSwitcherPro
             SaveConfig();
 
             int workingCount = serverList.Count(s => s.ping > 0);
-            string resolveBadge = dnsResolves ? "DNS: OK ✅" : "DNS: Сбой ⚠️";
+            string resolveBadge = dnsResolves ? "IPv4 DNS: OK ✅" : "IPv4 DNS: Сбой ⚠️";
             netStatusText.Text = $"{netType} • DoT: {workingCount}/{serverList.Count} • {resolveBadge}";
             RenderServerList();
 
@@ -1092,13 +1332,15 @@ namespace DnsSwitcherPro
 
         private async void VerifyActiveDnsInternet()
         {
-            netStatusText.Text = "⏳ Проверка интернет-отклика и DNS-резолвинга...";
+            netStatusText.Text = "⏳ Проверка IPv4 интернет-отклика и DNS-резолвинга...";
             var sw = Stopwatch.StartNew();
             bool ok = await Task.Run(() =>
             {
                 try
                 {
-                    var a = Dns.GetHostAddresses("google.com");
+                    var a = Dns.GetHostAddresses("google.com")
+                        .Where(ip => ip.AddressFamily == AddressFamily.InterNetwork)
+                        .ToArray();
                     return a.Length > 0;
                 }
                 catch { return false; }
@@ -1106,8 +1348,8 @@ namespace DnsSwitcherPro
             sw.Stop();
             int workingCount = serverList.Count(s => s.ping > 0);
             netStatusText.Text = ok
-                ? $"🌐 DNS резолвинг: OK ({sw.ElapsedMilliseconds} мс) ✅ • DoT: {workingCount}/{serverList.Count}"
-                : $"⚠️ Сбой разрешения доменов ❌ • DoT: {workingCount}/{serverList.Count}";
+                ? $"🌐 IPv4 резолвинг: OK ({sw.ElapsedMilliseconds} мс) ✅ • DoT: {workingCount}/{serverList.Count}"
+                : $"⚠️ Сбой разрешения доменов (IPv4) ❌ • DoT: {workingCount}/{serverList.Count}";
         }
 
         private Window CreateModalDialog(string title, Action? onBackAction = null)
@@ -1159,7 +1401,7 @@ namespace DnsSwitcherPro
                 Text = title,
                 FontSize = 14,
                 FontWeight = FontWeights.SemiBold,
-                Foreground = BrushFromHex(customTitleColor ?? textMainColorHex) // Приглушенный серо-серебристый для заголовков меню
+                Foreground = BrushFromHex(customTitleColor ?? textMainColorHex)
             });
             stack.Children.Add(new TextBlock
             {
@@ -1238,7 +1480,7 @@ namespace DnsSwitcherPro
                 ShowBackupDialog();
             }));
 
-            root.Children.Add(CreateMenuCard("✨ Кастомизация и автозапуск", "Тема, автозапуск с ПК, DoH-шифрование", () =>
+            root.Children.Add(CreateMenuCard("✨ Кастомизация и сеть", "Блокировка IPv6 (Gemini Guard), автозапуск, темы", () =>
             {
                 dlg.Close();
                 ShowCustomizationDialog();
@@ -1296,7 +1538,7 @@ namespace DnsSwitcherPro
             var scroll = new ScrollViewer
             {
                 MaxHeight = 290,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
                 Content = listBox
             };
             root.Children.Add(scroll);
@@ -1343,9 +1585,22 @@ namespace DnsSwitcherPro
         {
             var dlg = CreateModalDialog("Кастомизация", () => ShowSettingsDialog());
             var root = new StackPanel();
-            root.Children.Add(CreateDialogHeader("✨ Кастомизация"));
+            root.Children.Add(CreateDialogHeader("✨ Кастомизация и сеть"));
 
             bool autoStartActive = IsAutoStartEnabled();
+
+            root.Children.Add(CreateMenuCard("🚫 Блокировка IPv6 (Защита Gemini)",
+                config.BlockIpv6
+                    ? "Сейчас: IPv6 заблокирован (Gemini разрешён по IPv4)"
+                    : "Сейчас: IPv6 включён (Приложение и сайт Gemini ЗАБЛОКИРОВАНЫ)", () =>
+            {
+                config.BlockIpv6 = !config.BlockIpv6;
+                SaveConfig();
+                EnforceIpv6Policy();
+                RefreshSystemState();
+                dlg.Close();
+                ShowCustomizationDialog();
+            }, config.BlockIpv6 ? accentColorHex : "#FF5252"));
 
             root.Children.Add(CreateMenuCard("🚀 Автозапуск вместе с Windows",
                 autoStartActive ? "Сейчас: Включен (автостарт в трей при входе в ПК)" : "Сейчас: Отключен", () =>
@@ -1609,7 +1864,7 @@ namespace DnsSwitcherPro
             var scroll = new ScrollViewer
             {
                 MaxHeight = 310,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
                 Content = listStack
             };
             root.Children.Add(scroll);
@@ -1729,13 +1984,14 @@ namespace DnsSwitcherPro
             {
                 Icon = CreateCyberShieldIcon(),
                 Visible = true,
-                Text = "DNS Switcher Pro"
+                Text = "DNS Switcher Pro (IPv4 Only)"
             };
 
             trayIcon.DoubleClick += (s, e) =>
             {
                 Show();
                 WindowState = WindowState.Normal;
+                SizeToContent = SizeToContent.Height;
                 Activate();
             };
 
@@ -1749,6 +2005,7 @@ namespace DnsSwitcherPro
             {
                 Show();
                 WindowState = WindowState.Normal;
+                SizeToContent = SizeToContent.Height;
                 Activate();
             });
             menu.Items.Add(new Forms.ToolStripSeparator());
