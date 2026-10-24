@@ -49,29 +49,10 @@ jobs:
         working-directory: ./windows
         shell: pwsh
         run: |
-          Add-Type -AssemblyName System.Drawing
-          $sourceFile =$null
-          if (Test-Path "1000258844.ico") { $sourceFile = "1000258844.ico" }
-          elseif (Test-Path "icon.ico") { $sourceFile = "icon.ico" }
-          elseif (Test-Path "../1000258844.ico") { $sourceFile = "../1000258844.ico" }
-          elseif (Test-Path "../icon.ico") { $sourceFile = "../icon.ico" }
-
-          if ($sourceFile -ne$null) {
-            Write-Host "Используется пользовательский файл иконки: $sourceFile"
-            $origImg = [System.Drawing.Image]::FromFile((Resolve-Path $sourceFile).Path)$bmp = New-Object System.Drawing.Bitmap($origImg, 256, 256)$origImg.Dispose()
-
-            $msPng = New-Object System.IO.MemoryStream
-            $bmp.Save($msPng, [System.Drawing.Imaging.ImageFormat]::Png)$pngBytes = $msPng.ToArray()$bmp.Dispose()
-
-            $fs = [System.IO.File]::Create("$PWD\icon.ico")
-            $bw = New-Object System.IO.BinaryWriter($fs)
-            $bw.Write([uint16]0);$bw.Write([uint16]1); $bw.Write([uint16]1)$bw.Write([byte]0); $bw.Write([byte]0);$bw.Write([byte]0); $bw.Write([byte]0)$bw.Write([uint16]1); $bw.Write([uint16]32)$bw.Write([uint32]$pngBytes.Length)$bw.Write([uint32]22)
-            $bw.Write($pngBytes)
-            $bw.Close()$fs.Close()
-          } else {
-            Write-Error "Файл icon.ico или 1000258844.ico не найден в папке windows/!"
-            exit 1
-          }
+          if (Test-Path "1000258844.ico") { Copy-Item "1000258844.ico" "icon.ico" -Force; }
+          elseif (Test-Path "../1000258844.ico") { Copy-Item "../1000258844.ico" "icon.ico" -Force; }
+          elseif (Test-Path "../icon.ico") { Copy-Item "../icon.ico" "icon.ico" -Force; }
+          if (-not (Test-Path "icon.ico")) { Write-Error "icon.ico not found!"; exit 1; }
 
       - name: Publish Standalone EXE
         working-directory: ./windows
