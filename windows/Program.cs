@@ -10,6 +10,7 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -33,6 +34,14 @@ namespace DnsSwitcherPro
         public int ping { get; set; } = -1;
     }
 
+    public class BrowserConflictInfo
+    {
+        public string BrowserName { get; set; } = "";
+        public string LocalStatePath { get; set; } = "";
+        public string PolicyRegistryPath { get; set; } = "";
+        public string CurrentTemplate { get; set; } = "";
+    }
+
     public class AppConfig
     {
         public string Theme { get; set; } = "green";
@@ -40,6 +49,7 @@ namespace DnsSwitcherPro
         public bool AutoSortPing { get; set; } = true;
         public bool EnableDohEncryption { get; set; } = true;
         public bool BlockIpv6 { get; set; } = true;
+        public bool AutoFixBrowserDns { get; set; } = false;
         public bool StartWithWindows { get; set; } = true;
         public bool FirstRunCompleted { get; set; } = false;
         public string CurrentMode { get; set; } = "off";
@@ -87,7 +97,11 @@ namespace DnsSwitcherPro
         private TextBlock listHeader = null!;
         private Border pingBtnBorder = null!;
         private TextBlock pingBtnText = null!;
-        private Border clearGeminiCacheBtn = null!; // Кнопка очистки кук Gemini на главной
+        private Border clearGeminiCacheBtn = null!;
+
+        // Плашка предупреждения о конфликте DNS в браузере на главной панели
+        private Border browserWarningBanner = null!;
+        private TextBlock browserWarningText = null!;
 
         // Плашка Undo
         private Border undoBanner = null!;
@@ -100,6 +114,7 @@ namespace DnsSwitcherPro
         private DispatcherTimer ipv6GuardTimer = null!;
         private DateTime lastGeminiBlockNotify = DateTime.MinValue;
         private bool lastKnownHostsBlockState = false;
+        private bool browserWarningShownThisSession = false;
 
         private Forms.NotifyIcon trayIcon = null!;
         private bool isUpdatingUi = false;
@@ -195,11 +210,16 @@ namespace DnsSwitcherPro
             undoTimer.Tick += (s, e) =>
             {
                 undoBanner.Visibility = Visibility.Collapsed;
+                RecalculateWindowHeight();
                 undoTimer.Stop();
             };
 
-            ipv6GuardTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
-            ipv6GuardTimer.Tick += (s, e) => EnforceGeminiIpv6Guard();
+            ipv6GuardTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(2000) };
+            ipv6GuardTimer.Tick += (s, e) =>
+            {
+                EnforceGeminiIpv6Guard();
+                MonitorBrowserDnsSettings(showPopupOnConflict: false);
+            };
             ipv6GuardTimer.Start();
 
             Loaded += async (s, e) =>
@@ -208,6 +228,9 @@ namespace DnsSwitcherPro
                 DetectInitialSystemMode();
                 RefreshSystemState();
                 CheckNetworkAndTestAll();
+
+                // Проверяем настройки Безопасного DNS в браузерах при запуске
+                MonitorBrowserDnsSettings(showPopupOnConflict: !launchMinimized);
 
                 if (launchMinimized)
                 {
@@ -223,6 +246,342 @@ namespace DnsSwitcherPro
             };
         }
 
+        private void RecalculateWindowHeight()
+        {
+            SizeToContent = SizeToContent.Manual;
+            SizeToContent = SizeToContent.Height;
+        }
+
+        // Список поддерживаемых браузеров для мониторинга и автонастройки DoH
+        private List<(string Name, string LocalStatePath, string PolicyPath)> GetInstalledBrowsersTargetList()
+        {
+            string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+
+            return new List<(string, string, string)>
+            {
+                ("Google Chrome", Path.Combine(local, @"Google\Chrome\User Data\Local State"), @"SOFTWARE\Policies\Google\Chrome"),
+                ("Microsoft Edge", Path.Combine(local, @"Microsoft\Edge\User Data\Local State"), @"SOFTWARE\Policies\Microsoft\Edge"),
+                ("Brave Browser", Path.Combine(local, @"BraveSoftware\Brave-Browser\User Data\Local State"), @"SOFTWARE\Policies\BraveSoftware\Brave"),
+                ("Яндекс Браузер", Path.Combine(local, @"Yandex\YandexBrowser\User Data\Local State"), @"SOFTWARE\Policies\Yandex\YandexBrowser"),
+                ("Opera", Path.Combine(roaming, @"Opera Software\Opera Stable\Local State"), @"SOFTWARE\Policies\Opera Software"),
+                ("Opera GX", Path.Combine(roaming, @"Opera Software\Opera GX Stable\Local State"), @"SOFTWARE\Policies\Opera Software")
+            };
+        }
+
+        // Проверка: переопределяет ли браузер системный DNS своим собственным сервером
+        private List<BrowserConflictInfo> CheckBrowserDnsConflicts()
+        {
+            var conflicts = new List<BrowserConflictInfo>();
+
+            foreach (var b in GetInstalledBrowsersTargetList())
+            {
+                if (!File.Exists(b.LocalStatePath)) continue;
+
+                // Проверяем, не установлена ли уже наша групповая политика "automatic" в реестре
+                bool policyEnforced = false;
+                try
+                {
+                    using var key = Registry.LocalMachine.OpenSubKey(b.PolicyPath, false);
+                    string? polMode = key?.GetValue("DnsOverHttpsMode")?.ToString();
+                    string? polTemplates = key?.GetValue("DnsOverHttpsTemplates")?.ToString();
+                    if (polMode == "automatic" && string.IsNullOrEmpty(polTemplates))
+                    {
+                        policyEnforced = true;
+                    }
+                }
+                catch { }
+
+                try
+                {
+                    using var fs = new FileStream(b.LocalStatePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    using var sr = new StreamReader(fs, Encoding.UTF8);
+                    string jsonText = sr.ReadToEnd();
+
+                    var rootNode = JsonNode.Parse(jsonText);
+                    var dohNode = rootNode?["dns_over_https"];
+                    if (dohNode != null)
+                    {
+                        string mode = dohNode["mode"]?.GetValue<string>() ?? "";
+                        string templates = dohNode["templates"]?.GetValue<string>() ?? "";
+
+                        // Если в браузере выбран режим "secure" (сторонний провайдер) или прописан кастомный шаблон DoH,
+                        // и при этом политика еще не перекрыла его — это конфликт!
+                        if ((mode.Equals("secure", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrWhiteSpace(templates)) && !policyEnforced)
+                        {
+                            conflicts.Add(new BrowserConflictInfo
+                            {
+                                BrowserName = b.Name,
+                                LocalStatePath = b.LocalStatePath,
+                                PolicyRegistryPath = b.PolicyPath,
+                                CurrentTemplate = string.IsNullOrWhiteSpace(templates) ? "Кастомный провайдер (mode: secure)" : templates
+                            });
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            return conflicts;
+        }
+
+        // Мониторинг конфликтов DNS в браузерах и обновление баннера/окна предупреждения
+        private void MonitorBrowserDnsSettings(bool showPopupOnConflict)
+        {
+            if (config.AutoFixBrowserDns)
+            {
+                var found = CheckBrowserDnsConflicts();
+                if (found.Count > 0)
+                {
+                    ApplyBrowserDnsAutoFix(silent: true);
+                }
+                browserWarningBanner.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            var conflicts = CheckBrowserDnsConflicts();
+            if (conflicts.Count > 0)
+            {
+                string names = string.Join(", ", conflicts.Select(c => c.BrowserName));
+                browserWarningText.Text = $"⚠️ Конфликт DNS в браузере ({names})! Нажмите для исправления";
+                if (browserWarningBanner.Visibility != Visibility.Visible)
+                {
+                    browserWarningBanner.Visibility = Visibility.Visible;
+                    RecalculateWindowHeight();
+                }
+
+                if (showPopupOnConflict && !browserWarningShownThisSession)
+                {
+                    browserWarningShownThisSession = true;
+                    ShowBrowserDnsWarningDialog(conflicts);
+                }
+            }
+            else
+            {
+                if (browserWarningBanner.Visibility != Visibility.Collapsed)
+                {
+                    browserWarningBanner.Visibility = Visibility.Collapsed;
+                    RecalculateWindowHeight();
+                }
+            }
+        }
+
+        // Автоматическая настройка браузеров на использование системного DNS Windows
+        private void ApplyBrowserDnsAutoFix(bool silent = false)
+        {
+            int fixedCount = 0;
+
+            foreach (var b in GetInstalledBrowsersTargetList())
+            {
+                if (!File.Exists(b.LocalStatePath)) continue;
+
+                // 1. Прописываем системную политику для Chromium-браузеров:
+                // режим "automatic" заставляет браузер использовать текущего поставщика услуг (системный DNS Windows)
+                try
+                {
+                    using var polKey = Registry.LocalMachine.CreateSubKey(b.PolicyPath, true);
+                    polKey?.SetValue("DnsOverHttpsMode", "automatic", RegistryValueKind.String);
+                    polKey?.DeleteValue("DnsOverHttpsTemplates", false);
+                    fixedCount++;
+                }
+                catch { }
+
+                // 2. Очищаем кастомный шаблон в файле Local State браузера
+                try
+                {
+                    string jsonText;
+                    using (var fs = new FileStream(b.LocalStatePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    using (var sr = new StreamReader(fs, Encoding.UTF8))
+                    {
+                        jsonText = sr.ReadToEnd();
+                    }
+
+                    var rootNode = JsonNode.Parse(jsonText);
+                    if (rootNode != null)
+                    {
+                        var dohObj = new JsonObject
+                        {
+                            ["mode"] = "automatic",
+                            ["templates"] = ""
+                        };
+                        rootNode["dns_over_https"] = dohObj;
+                        File.WriteAllText(b.LocalStatePath, rootNode.ToJsonString(), Encoding.UTF8);
+                    }
+                }
+                catch { }
+            }
+
+            config.AutoFixBrowserDns = true;
+            SaveConfig();
+            browserWarningBanner.Visibility = Visibility.Collapsed;
+            RecalculateWindowHeight();
+
+            if (!silent)
+            {
+                MessageBox.Show(
+                    $"✅ Настройки браузеров ({fixedCount} шт.) успешно синхронизированы!\n\n" +
+                    "Теперь браузеры используют режим «С вашим текущим поставщиком услуг» и полностью подчиняются DNS Switcher Pro.\n" +
+                    "Если браузер сейчас открыт — перезапустите его для применения.",
+                    "Автонастройка браузеров",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+            }
+        }
+
+        // Снятие принудительных политик браузера (если пользователь захочет управлять вручную)
+        private void RemoveBrowserDnsPolicies()
+        {
+            foreach (var b in GetInstalledBrowsersTargetList())
+            {
+                try
+                {
+                    using var polKey = Registry.LocalMachine.OpenSubKey(b.PolicyPath, true);
+                    polKey?.DeleteValue("DnsOverHttpsMode", false);
+                    polKey?.DeleteValue("DnsOverHttpsTemplates", false);
+                }
+                catch { }
+            }
+            config.AutoFixBrowserDns = false;
+            SaveConfig();
+            MonitorBrowserDnsSettings(showPopupOnConflict: false);
+        }
+
+        // Окно предупреждения о конфликте Безопасного DNS в браузере + выбор (Автоисправление или Инструкция)
+        private void ShowBrowserDnsWarningDialog(List<BrowserConflictInfo> conflicts)
+        {
+            var dlg = CreateModalDialog("Конфликт DNS в браузере");
+            var root = new StackPanel();
+            root.Children.Add(CreateDialogHeader("⚠️ Конфликт DNS в браузере"));
+
+            var sb = new StringBuilder();
+            sb.AppendLine("Обнаружено, что в вашем браузере включён сторонний «Безопасный DNS», который игнорирует настройки Windows и обращается к серверам напрямую:\n");
+            foreach (var c in conflicts)
+            {
+                sb.AppendLine($"• {c.BrowserName}: {c.CurrentTemplate}");
+            }
+            sb.Append("\nИз-за этого Gemini может определять ваш реальный регион. Как вы хотите решить проблему?");
+
+            var infoBox = new Border
+            {
+                Background = BrushFromHex(bgCardHex),
+                BorderBrush = BrushFromHex("#FFAB00"),
+                BorderThickness = new Thickness(1.5),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(14, 12, 14, 12),
+                Margin = new Thickness(0, 0, 0, 12),
+                Child = new TextBlock
+                {
+                    Text = sb.ToString(),
+                    FontSize = 12.5,
+                    Foreground = BrushFromHex(textMainColorHex),
+                    TextWrapping = TextWrapping.Wrap
+                }
+            };
+            root.Children.Add(infoBox);
+
+            root.Children.Add(CreateDialogButton("⚡ Исправить автоматически (в 1 клик)", accentColorHex, () =>
+            {
+                dlg.Close();
+                ApplyBrowserDnsAutoFix(silent: false);
+            }, accentCardBgHex, accentColorHex));
+
+            root.Children.Add(CreateDialogButton("📖 Инструкция (Как исправить вручную)", "#00B0FF", () =>
+            {
+                dlg.Close();
+                ShowBrowserManualGuideDialog();
+            }, config.LightMode ? "#E3F2FD" : "#101A24", "#00B0FF"));
+
+            root.Children.Add(CreateDialogButton("Напомнить позже", textSubColorHex, () => dlg.Close()));
+
+            dlg.Content = new Border
+            {
+                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
+                BorderBrush = BrushFromHex("#FFAB00"),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(20),
+                Padding = new Thickness(22, 18, 22, 18),
+                Child = root
+            };
+            dlg.ShowDialog();
+        }
+
+        // Подробная инструкция по ручной настройке Безопасного DNS в браузерах с кнопками копирования адресов
+        private void ShowBrowserManualGuideDialog(bool returnToCustomization = false)
+        {
+            var dlg = CreateModalDialog("Инструкция для браузера", () =>
+            {
+                if (returnToCustomization) ShowCustomizationDialog();
+            });
+            var root = new StackPanel();
+            root.Children.Add(CreateDialogHeader("📖 Настройка DNS в браузере"));
+
+            string guideText =
+                "Чтобы браузер не обходил DNS Switcher Pro своими путями:\n\n" +
+                "1. Откройте раздел «Безопасность» в настройках браузера (нажмите на кнопку вашего браузера ниже, чтобы скопировать быструю ссылку, и вставьте её в адресную строку).\n\n" +
+                "2. Прокрутите вниз до пункта «Использовать безопасный DNS-сервер» (Use secure DNS).\n\n" +
+                "3. Выберите переключатель «С вашим текущим поставщиком услуг» (With your current service provider) либо совсем отключите этот тумблер.\n\n" +
+                "⚠️ Не выбирайте внутри браузера стандартные пункты «Google (Public DNS)» или «Cloudflare (1.1.1.1)»!";
+
+            var guideBox = new Border
+            {
+                Background = BrushFromHex(bgCardHex),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(1.5),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(14, 12, 14, 12),
+                Margin = new Thickness(0, 0, 0, 12),
+                Child = new TextBlock
+                {
+                    Text = guideText,
+                    FontSize = 12.5,
+                    Foreground = BrushFromHex(textMainColorHex),
+                    TextWrapping = TextWrapping.Wrap
+                }
+            };
+            root.Children.Add(guideBox);
+
+            // Кнопки быстрого копирования ссылок в буфер обмена
+            var links = new (string Label, string Url)[]
+            {
+                ("📋 Скопировать для Chrome: chrome://settings/security", "chrome://settings/security"),
+                ("📋 Скопировать для Edge: edge://settings/privacy", "edge://settings/privacy"),
+                ("📋 Скопировать для Brave: brave://settings/security", "brave://settings/security"),
+                ("📋 Скопировать для Яндекс: browser://settings/security", "browser://settings/security")
+            };
+
+            foreach (var l in links)
+            {
+                root.Children.Add(CreateDialogButton(l.Label, textMainColorHex, () =>
+                {
+                    Clipboard.SetText(l.Url);
+                    MessageBox.Show($"Ссылка {l.Url} скопирована!\nВставьте её (Ctrl+V) в адресную строку браузера и нажмите Enter.", "Скопировано", MessageBoxButton.OK, MessageBoxImage.Information);
+                }));
+            }
+
+            root.Children.Add(CreateDialogButton("⚡ Или исправить автоматически в 1 клик", accentColorHex, () =>
+            {
+                dlg.Close();
+                ApplyBrowserDnsAutoFix(silent: false);
+            }, accentCardBgHex, accentColorHex));
+
+            root.Children.Add(CreateDialogButton("Закрыть", textSubColorHex, () =>
+            {
+                dlg.Close();
+                if (returnToCustomization) ShowCustomizationDialog();
+            }));
+
+            dlg.Content = new Border
+            {
+                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(20),
+                Padding = new Thickness(22, 18, 22, 18),
+                Child = root
+            };
+            dlg.ShowDialog();
+        }
+
         // Функция автоматической очистки Cookies и кэша Gemini в браузерах пользователя
         private void ClearGeminiCookiesAndCache()
         {
@@ -233,7 +592,8 @@ namespace DnsSwitcherPro
                 {
                     Path.Combine(localAppData, @"Google\Chrome\User Data\Default"),
                     Path.Combine(localAppData, @"Microsoft\Edge\User Data\Default"),
-                    Path.Combine(localAppData, @"BraveSoftware\Brave-Browser\User Data\Default")
+                    Path.Combine(localAppData, @"BraveSoftware\Brave-Browser\User Data\Default"),
+                    Path.Combine(localAppData, @"Yandex\YandexBrowser\User Data\Default")
                 };
 
                 int cleanedCount = 0;
@@ -241,7 +601,6 @@ namespace DnsSwitcherPro
                 {
                     if (!Directory.Exists(bPath)) continue;
 
-                    // Удаляем файлы Network/Cookies и Local Storage для домена google.com
                     string networkDir = Path.Combine(bPath, "Network");
                     string cookiesFile = Path.Combine(networkDir, "Cookies");
                     if (File.Exists(cookiesFile))
@@ -262,7 +621,7 @@ namespace DnsSwitcherPro
                 MessageBox.Show(
                     cleanedCount > 0
                         ? "✅ Кэш и куки Google/Gemini успешно очищены!\nПерезапустите браузер или вкладку Gemini."
-                        : "ℹ️ Браузеры не запущены или файлы куки не найдены.",
+                        : "ℹ️ Закройте браузер перед очисткой (файлы заняты процессом) либо кэш уже чист.",
                     "Очистка Gemini Cache",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);
@@ -643,12 +1002,44 @@ namespace DnsSwitcherPro
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(12),
                 Padding = new Thickness(14, 11, 14, 11),
-                Margin = new Thickness(0, 0, 0, 14),
+                Margin = new Thickness(0, 0, 0, 12),
                 Cursor = Cursors.Hand,
                 Child = netStatusText
             };
             netStatusBorder.MouseLeftButtonUp += (s, e) => VerifyActiveDnsInternet();
             mainLayout.Children.Add(netStatusBorder);
+
+            // Сигнальная плашка конфликта DNS в браузере (появляется автоматически при обнаружении проблемы)
+            browserWarningText = new TextBlock
+            {
+                Text = "⚠️ Конфликт Безопасного DNS в браузере! Нажмите для решения",
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = BrushFromHex("#FFD54F"),
+                TextWrapping = TextWrapping.Wrap
+            };
+
+            browserWarningBanner = new Border
+            {
+                Background = BrushFromHex("#261A00"),
+                BorderBrush = BrushFromHex("#FFAB00"),
+                BorderThickness = new Thickness(1.5),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(14, 10, 14, 10),
+                Margin = new Thickness(0, 0, 0, 12),
+                Visibility = Visibility.Collapsed,
+                Cursor = Cursors.Hand,
+                Child = browserWarningText
+            };
+            browserWarningBanner.MouseLeftButtonUp += (s, e) =>
+            {
+                var currentConflicts = CheckBrowserDnsConflicts();
+                if (currentConflicts.Count > 0)
+                    ShowBrowserDnsWarningDialog(currentConflicts);
+                else
+                    ShowBrowserManualGuideDialog();
+            };
+            mainLayout.Children.Add(browserWarningBanner);
 
             // Карточка системного режима
             var modeInner = new StackPanel();
@@ -730,7 +1121,7 @@ namespace DnsSwitcherPro
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(16),
                 Padding = new Thickness(16, 14, 16, 14),
-                Margin = new Thickness(0, 0, 0, 14),
+                Margin = new Thickness(0, 0, 0, 12),
                 Child = modeInner
             };
             mainLayout.Children.Add(modeCard);
@@ -752,7 +1143,7 @@ namespace DnsSwitcherPro
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(12),
                 Padding = new Thickness(14, 10, 14, 10),
-                Margin = new Thickness(0, 0, 0, 18),
+                Margin = new Thickness(0, 0, 0, 16),
                 Cursor = Cursors.Hand,
                 Child = clearGeminiText
             };
@@ -830,6 +1221,7 @@ namespace DnsSwitcherPro
                     SaveConfig();
                     RenderServerList();
                     undoBanner.Visibility = Visibility.Collapsed;
+                    RecalculateWindowHeight();
                     undoTimer.Stop();
                 }
             };
@@ -1317,8 +1709,7 @@ namespace DnsSwitcherPro
                 listContainer.Children.Add(cardBorder);
             }
 
-            SizeToContent = SizeToContent.Manual;
-            SizeToContent = SizeToContent.Height;
+            RecalculateWindowHeight();
         }
 
         private async void CheckNetworkAndTestAll(bool autoConnectBest = false)
@@ -1469,7 +1860,8 @@ namespace DnsSwitcherPro
                 Text = subtitle,
                 FontSize = 11.5,
                 Foreground = BrushFromHex(textSubColorHex),
-                Margin = new Thickness(0, 3, 0, 0)
+                Margin = new Thickness(0, 3, 0, 0),
+                TextWrapping = TextWrapping.Wrap
             });
 
             var border = new Border
@@ -1501,10 +1893,11 @@ namespace DnsSwitcherPro
                 Child = new TextBlock
                 {
                     Text = text,
-                    FontSize = 14,
+                    FontSize = 13.5,
                     FontWeight = FontWeights.Bold,
                     Foreground = BrushFromHex(textColorHex),
-                    HorizontalAlignment = HorizontalAlignment.Center
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    TextWrapping = TextWrapping.Wrap
                 }
             };
             btn.MouseLeftButtonUp += (s, e) => onClick();
@@ -1541,7 +1934,7 @@ namespace DnsSwitcherPro
                 ShowBackupDialog();
             }));
 
-            root.Children.Add(CreateMenuCard("✨ Кастомизация и сеть", "Блокировка IPv6 (Gemini Guard), автозапуск, темы", () =>
+            root.Children.Add(CreateMenuCard("✨ Кастомизация и сеть", "Контроль браузеров, блокировка IPv6, автозапуск, темы", () =>
             {
                 dlg.Close();
                 ShowCustomizationDialog();
@@ -1649,6 +2042,19 @@ namespace DnsSwitcherPro
             root.Children.Add(CreateDialogHeader("✨ Кастомизация и сеть"));
 
             bool autoStartActive = IsAutoStartEnabled();
+            var browserConflicts = CheckBrowserDnsConflicts();
+
+            string browserStatusSub = config.AutoFixBrowserDns
+                ? "Сейчас: Автоподчинение ВКЛ (браузеры берут системный DNS)"
+                : (browserConflicts.Count > 0
+                    ? $"⚠️ Обнаружен конфликт ({string.Join(", ", browserConflicts.Select(c => c.BrowserName))})! Нажмите для решения"
+                    : "Сейчас: Мониторинг активен (конфликтов не обнаружено)");
+
+            root.Children.Add(CreateMenuCard("🌐 Контроль DNS в браузерах (Chrome / Edge / Brave)", browserStatusSub, () =>
+            {
+                dlg.Close();
+                ShowBrowserControlMenuDialog();
+            }, browserConflicts.Count > 0 ? "#FFAB00" : (config.AutoFixBrowserDns ? accentColorHex : null)));
 
             root.Children.Add(CreateMenuCard("🚫 Блокировка IPv6 (Защита Gemini)",
                 config.BlockIpv6
@@ -1716,6 +2122,64 @@ namespace DnsSwitcherPro
             {
                 dlg.Close();
                 ShowSettingsDialog();
+            }));
+
+            dlg.Content = new Border
+            {
+                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(20),
+                Padding = new Thickness(22, 18, 22, 18),
+                Child = root
+            };
+            dlg.ShowDialog();
+        }
+
+        private void ShowBrowserControlMenuDialog()
+        {
+            var dlg = CreateModalDialog("Контроль DNS в браузерах", () => ShowCustomizationDialog());
+            var root = new StackPanel();
+            root.Children.Add(CreateDialogHeader("🌐 Контроль DNS в браузерах"));
+
+            var conflicts = CheckBrowserDnsConflicts();
+            string statusMsg = conflicts.Count > 0
+                ? $"⚠️ Обнаружен сторонний DNS в: {string.Join(", ", conflicts.Select(c => c.BrowserName))}."
+                : "✅ Все обнаруженные браузеры подчиняются системному DNS Windows.";
+
+            root.Children.Add(CreateMenuCard("🔍 Статус проверки браузеров", statusMsg, () => { },
+                conflicts.Count > 0 ? "#FFAB00" : accentColorHex));
+
+            root.Children.Add(CreateMenuCard("⚡ Автоматически подчинить браузеры системе",
+                "Перевести Chrome, Edge, Brave и Яндекс в режим «С вашим текущим поставщиком услуг»", () =>
+            {
+                dlg.Close();
+                ApplyBrowserDnsAutoFix(silent: false);
+                ShowCustomizationDialog();
+            }, accentColorHex));
+
+            root.Children.Add(CreateMenuCard("📖 Открыть инструкцию (Как настроить вручную)",
+                "Пошаговое описание и быстрые ссылки для адресной строки", () =>
+            {
+                dlg.Close();
+                ShowBrowserManualGuideDialog(returnToCustomization: true);
+            }));
+
+            if (config.AutoFixBrowserDns)
+            {
+                root.Children.Add(CreateMenuCard("🔓 Отключить принудительную политику браузеров",
+                    "Разрешить ручное изменение DNS внутри настроек браузера", () =>
+                {
+                    RemoveBrowserDnsPolicies();
+                    dlg.Close();
+                    ShowCustomizationDialog();
+                }));
+            }
+
+            root.Children.Add(CreateDialogButton("Назад к кастомизации", textSubColorHex, () =>
+            {
+                dlg.Close();
+                ShowCustomizationDialog();
             }));
 
             dlg.Content = new Border
@@ -1801,6 +2265,7 @@ namespace DnsSwitcherPro
 
                 undoText.Text = $"Удален «{lastDeletedServer.name}»";
                 undoBanner.Visibility = Visibility.Visible;
+                RecalculateWindowHeight();
                 undoTimer.Stop();
                 undoTimer.Start();
             }, "#FF5252", "#FF5252"));
@@ -2052,7 +2517,7 @@ namespace DnsSwitcherPro
             {
                 Show();
                 WindowState = WindowState.Normal;
-                SizeToContent = SizeToContent.Height;
+                RecalculateWindowHeight();
                 Activate();
             };
 
@@ -2066,7 +2531,7 @@ namespace DnsSwitcherPro
             {
                 Show();
                 WindowState = WindowState.Normal;
-                SizeToContent = SizeToContent.Height;
+                RecalculateWindowHeight();
                 Activate();
             });
             menu.Items.Add(new Forms.ToolStripSeparator());
