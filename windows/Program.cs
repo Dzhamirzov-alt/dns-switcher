@@ -117,6 +117,7 @@ namespace DnsSwitcherPro
 
         private Forms.NotifyIcon trayIcon = null!;
         private bool isUpdatingUi = false;
+        private bool isRecalculatingHeight = false;
 
         private string accentColorHex = "#00E676";
         private string accentCardBgHex = "#0D2318";
@@ -185,11 +186,12 @@ namespace DnsSwitcherPro
             Directory.CreateDirectory(dir);
             configPath = Path.Combine(dir, "config.json");
 
+            // Поддержка изменения размера окна мышкой, разворачивания во весь экран и аккуратной автовысоты
             Title = "DNS Switcher Pro";
-            Width = 435;
-            SizeToContent = SizeToContent.Height;
-            MaxHeight = SystemParameters.WorkArea.Height - 24;
-            ResizeMode = ResizeMode.CanMinimize;
+            Width = 440;
+            MinWidth = 400;
+            MinHeight = 420;
+            ResizeMode = ResizeMode.CanResize;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
 
             LoadConfig();
@@ -197,6 +199,19 @@ namespace DnsSwitcherPro
             ApplyCustomWindowAndTrayIcon();
             SetupUI();
             SetupTrayIcon();
+
+            StateChanged += (s, e) =>
+            {
+                if (WindowState == WindowState.Maximized)
+                {
+                    SizeToContent = SizeToContent.Manual;
+                    UpdateScrollBarVisibility();
+                }
+                else if (WindowState == WindowState.Normal)
+                {
+                    RecalculateWindowHeight();
+                }
+            };
 
             undoTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
             undoTimer.Tick += (s, e) =>
@@ -215,20 +230,19 @@ namespace DnsSwitcherPro
 
             Loaded += async (s, e) =>
             {
-                // Гарантируем создание/восстановление автозапуска при каждом старте, если он включен
+                RecalculateWindowHeight();
+
                 if (config.StartWithWindows)
                 {
                     await Task.Run(() => SetAutoStartTask(true));
                 }
 
-                // Сначала применяем политику IPv4 и очищаем hosts от старых записей ::1
                 await Task.Run(() => EnforceIpv6Policy());
 
                 DetectInitialSystemMode();
                 RefreshSystemState();
                 CheckNetworkAndTestAll();
 
-                // Запускаем таймер мониторинга только после полной инициализации сети
                 ipv6GuardTimer.Start();
 
                 MonitorBrowserDnsSettings(showPopupOnConflict: !launchMinimized);
@@ -256,10 +270,68 @@ namespace DnsSwitcherPro
             };
         }
 
+        // Автоматический расчёт высоты окна:
+        // Если серверы помещаются на экране (например, стандартные 7 серверов) — окно аккуратно подстраивается под них без ползунка.
+        // Если серверов много и они не помещаются по высоте экрана — окно ограничивается высотой рабочей области и включает ползунок.
         private void RecalculateWindowHeight()
         {
-            SizeToContent = SizeToContent.Manual;
-            SizeToContent = SizeToContent.Height;
+            if (mainLayout == null || rootScroll == null) return;
+
+            if (WindowState == WindowState.Maximized)
+            {
+                SizeToContent = SizeToContent.Manual;
+                UpdateScrollBarVisibility();
+                return;
+            }
+
+            isRecalculatingHeight = true;
+            try
+            {
+                double currentWidth = ActualWidth > 0 ? ActualWidth : Width;
+                double measureWidth = Math.Max(360, currentWidth - 20);
+
+                mainLayout.Measure(new System.Windows.Size(measureWidth, double.PositiveInfinity));
+
+                // Высота содержимого + высота системного заголовка и рамок окна Windows (~42px)
+                double desiredWindowHeight = mainLayout.DesiredSize.Height + 42;
+                double maxWorkAreaHeight = SystemParameters.WorkArea.Height - 20;
+
+                if (desiredWindowHeight <= maxWorkAreaHeight)
+                {
+                    rootScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden;
+                    SizeToContent = SizeToContent.Manual;
+                    SizeToContent = SizeToContent.Height;
+                }
+                else
+                {
+                    SizeToContent = SizeToContent.Manual;
+                    Height = maxWorkAreaHeight;
+                    rootScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Visible;
+
+                    if (Top + Height > SystemParameters.WorkArea.Bottom)
+                    {
+                        Top = Math.Max(SystemParameters.WorkArea.Top + 6, SystemParameters.WorkArea.Bottom - Height);
+                    }
+                }
+            }
+            finally
+            {
+                isRecalculatingHeight = false;
+            }
+        }
+
+        // Динамическое отображение ползунка при ручном изменении размера окна пользователем
+        private void UpdateScrollBarVisibility()
+        {
+            if (rootScroll == null || isRecalculatingHeight) return;
+
+            bool needsScroll = rootScroll.ExtentHeight > rootScroll.ViewportHeight + 4;
+            var desiredVisibility = needsScroll ? ScrollBarVisibility.Visible : ScrollBarVisibility.Hidden;
+
+            if (rootScroll.VerticalScrollBarVisibility != desiredVisibility)
+            {
+                rootScroll.VerticalScrollBarVisibility = desiredVisibility;
+            }
         }
 
         private Icon LoadAppCustomIcon()
@@ -543,11 +615,11 @@ namespace DnsSwitcherPro
             dlg.ShowDialog();
         }
 
-        private void ShowBrowserManualGuideDialog(bool returnToCustomization = false)
+        private void ShowBrowserManualGuideDialog(bool returnToNetworkSettings = false)
         {
             var dlg = CreateModalDialog("Инструкция для браузера", () =>
             {
-                if (returnToCustomization) ShowCustomizationDialog();
+                if (returnToNetworkSettings) ShowNetworkSettingsDialog();
             });
             var root = new StackPanel();
             root.Children.Add(CreateDialogHeader("📖 Настройка DNS в браузере"));
@@ -603,7 +675,7 @@ namespace DnsSwitcherPro
             root.Children.Add(CreateDialogButton("Закрыть", textSubColorHex, () =>
             {
                 dlg.Close();
-                if (returnToCustomization) ShowCustomizationDialog();
+                if (returnToNetworkSettings) ShowNetworkSettingsDialog();
             }));
 
             dlg.Content = new Border
@@ -667,13 +739,9 @@ namespace DnsSwitcherPro
             }
         }
 
-        // Проверка: включен ли IPv6
         private bool IsIpv6CurrentlyEnabled()
         {
-            // Если в настройках включена блокировка IPv6 (режим IPv4 Only),
-            // программа сама держит IPv6 отключенным — блокировать Gemini НЕ нужно
             if (config.BlockIpv6) return false;
-
             return true;
         }
 
@@ -738,13 +806,10 @@ namespace DnsSwitcherPro
             trayIcon?.ShowBalloonTip(
                 2500,
                 "🚫 Gemini заблокирован (Включён IPv6)",
-                "При включённом IPv6 приложение и сайт Gemini заблокированы. Включите блокировку IPv6 (IPv4 Only) в настройках.",
+                "При включённом IPv6 приложение и сайт Gemini заблокированы. Включите блокировку IPv6 (IPv4 Only) в сетевых настройках.",
                 Forms.ToolTipIcon.Warning);
         }
 
-        // Обновление файла hosts:
-        // Когда IPv6 выключен (blockCompletely == false) — ПОЛНОСТЬЮ очищаем hosts от любых правил для Gemini!
-        // Когда IPv6 включен (blockCompletely == true) — блокируем доступ к сайту Gemini через 0.0.0.0.
         private void UpdateGeminiHostsRule(bool blockCompletely)
         {
             try
@@ -769,7 +834,6 @@ namespace DnsSwitcherPro
                         insideBlock = false;
                         continue;
                     }
-                    // Также удаляем любые старые остаточные строки ::1 или 0.0.0.0 для gemini.google.com
                     if (trimmed.Contains("gemini.google.com", StringComparison.OrdinalIgnoreCase) ||
                         trimmed.Contains("aistudio.google.com", StringComparison.OrdinalIgnoreCase))
                     {
@@ -781,7 +845,6 @@ namespace DnsSwitcherPro
                     }
                 }
 
-                // Записываем блокировку ТОЛЬКО если включен IPv6 (blockCompletely == true)
                 if (blockCompletely)
                 {
                     cleaned.Add(HostsBlockStartMarker);
@@ -822,7 +885,6 @@ namespace DnsSwitcherPro
                 }
                 catch { }
 
-                // В режиме IPv4 Only полностью очищаем файл hosts от блокировок Gemini
                 UpdateGeminiHostsRule(blockCompletely: false);
                 lastKnownHostsBlockState = false;
             }
@@ -842,7 +904,6 @@ namespace DnsSwitcherPro
                 }
                 catch { }
 
-                // При включенном IPv6 блокируем сайт и приложение Gemini
                 UpdateGeminiHostsRule(blockCompletely: true);
                 lastKnownHostsBlockState = true;
                 Dispatcher.Invoke(EnforceGeminiIpv6Guard);
@@ -866,7 +927,6 @@ namespace DnsSwitcherPro
             catch { return false; }
         }
 
-        // Надёжная регистрация автозапуска с поддержкой работы на ноутбуках от аккумулятора
         private void SetAutoStartTask(bool enable)
         {
             try
@@ -926,13 +986,16 @@ namespace DnsSwitcherPro
                 Background = BrushFromHex(bgRootHex)
             };
 
+            // Отслеживаем соотношение высоты контента и окна (для ручного изменения размера мышкой или добавления многих серверов)
+            rootScroll.ScrollChanged += (s, e) => UpdateScrollBarVisibility();
+
             mainLayout = new StackPanel
             {
-                Margin = new Thickness(20, 20, 20, 20)
+                Margin = new Thickness(18, 16, 18, 16)
             };
 
             // Шапка
-            var topGrid = new Grid { Margin = new Thickness(0, 0, 0, 14) };
+            var topGrid = new Grid { Margin = new Thickness(0, 0, 0, 12) };
             topGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             topGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
@@ -989,8 +1052,8 @@ namespace DnsSwitcherPro
                 BorderBrush = BrushFromHex(bgCardStrokeHex),
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(12),
-                Padding = new Thickness(14, 11, 14, 11),
-                Margin = new Thickness(0, 0, 0, 12),
+                Padding = new Thickness(14, 10, 14, 10),
+                Margin = new Thickness(0, 0, 0, 10),
                 Cursor = Cursors.Hand,
                 Child = netStatusText
             };
@@ -1013,8 +1076,8 @@ namespace DnsSwitcherPro
                 BorderBrush = BrushFromHex("#FFAB00"),
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(12),
-                Padding = new Thickness(14, 10, 14, 10),
-                Margin = new Thickness(0, 0, 0, 12),
+                Padding = new Thickness(14, 9, 14, 9),
+                Margin = new Thickness(0, 0, 0, 10),
                 Visibility = Visibility.Collapsed,
                 Cursor = Cursors.Hand,
                 Child = browserWarningText
@@ -1037,7 +1100,7 @@ namespace DnsSwitcherPro
                 FontSize = 11.5,
                 FontWeight = FontWeights.Bold,
                 Foreground = BrushFromHex(textSubColorHex),
-                Margin = new Thickness(0, 0, 0, 10)
+                Margin = new Thickness(0, 0, 0, 8)
             };
             modeInner.Children.Add(modeTitle);
 
@@ -1108,8 +1171,8 @@ namespace DnsSwitcherPro
                 BorderBrush = BrushFromHex(bgCardStrokeHex),
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(16),
-                Padding = new Thickness(16, 14, 16, 14),
-                Margin = new Thickness(0, 0, 0, 12),
+                Padding = new Thickness(16, 12, 16, 12),
+                Margin = new Thickness(0, 0, 0, 10),
                 Child = modeInner
             };
             mainLayout.Children.Add(modeCard);
@@ -1130,8 +1193,8 @@ namespace DnsSwitcherPro
                 BorderBrush = BrushFromHex(accentColorHex),
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(12),
-                Padding = new Thickness(14, 10, 14, 10),
-                Margin = new Thickness(0, 0, 0, 16),
+                Padding = new Thickness(14, 9, 14, 9),
+                Margin = new Thickness(0, 0, 0, 14),
                 Cursor = Cursors.Hand,
                 Child = clearGeminiText
             };
@@ -1139,7 +1202,7 @@ namespace DnsSwitcherPro
             mainLayout.Children.Add(clearGeminiCacheBtn);
 
             // Заголовок списка + кнопка пинга
-            var headerGrid = new Grid { Margin = new Thickness(0, 0, 0, 12) };
+            var headerGrid = new Grid { Margin = new Thickness(0, 0, 0, 10) };
             headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
@@ -1166,7 +1229,7 @@ namespace DnsSwitcherPro
                 BorderBrush = BrushFromHex(accentColorHex),
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(11),
-                Padding = new Thickness(12, 6, 12, 6),
+                Padding = new Thickness(12, 5, 12, 5),
                 Cursor = Cursors.Hand,
                 Child = pingBtnText
             };
@@ -1225,8 +1288,8 @@ namespace DnsSwitcherPro
                 BorderBrush = BrushFromHex(accentColorHex),
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(12),
-                Padding = new Thickness(14, 10, 14, 10),
-                Margin = new Thickness(0, 0, 0, 12),
+                Padding = new Thickness(14, 9, 14, 9),
+                Margin = new Thickness(0, 0, 0, 10),
                 Visibility = Visibility.Collapsed,
                 Child = undoGrid
             };
@@ -1590,7 +1653,7 @@ namespace DnsSwitcherPro
                 var nameTv = new TextBlock
                 {
                     Text = server.name,
-                    FontSize = 15,
+                    FontSize = 14.5,
                     FontWeight = FontWeights.SemiBold,
                     Foreground = BrushFromHex(textMainColorHex),
                     VerticalAlignment = VerticalAlignment.Center
@@ -1629,9 +1692,9 @@ namespace DnsSwitcherPro
                 var subTv = new TextBlock
                 {
                     Text = $"{server.host}{pingPart}",
-                    FontSize = 12.5,
+                    FontSize = 12,
                     Foreground = BrushFromHex(server.ping == -3 ? "#FF5252" : textSubColorHex),
-                    Margin = new Thickness(0, 3, 0, 0)
+                    Margin = new Thickness(0, 2, 0, 0)
                 };
 
                 infoStack.Children.Add(nameRow);
@@ -1641,8 +1704,8 @@ namespace DnsSwitcherPro
 
                 var moreBtn = new Border
                 {
-                    Width = 36,
-                    Height = 36,
+                    Width = 34,
+                    Height = 34,
                     Background = BrushFromHex(config.LightMode ? "#EFEFF1" : "#181B22"),
                     BorderBrush = BrushFromHex(bgCardStrokeHex),
                     BorderThickness = new Thickness(1),
@@ -1652,7 +1715,7 @@ namespace DnsSwitcherPro
                     Child = new TextBlock
                     {
                         Text = "⋮",
-                        FontSize = 18,
+                        FontSize = 17,
                         FontWeight = FontWeights.Bold,
                         Foreground = BrushFromHex(textSubColorHex),
                         HorizontalAlignment = HorizontalAlignment.Center,
@@ -1673,8 +1736,8 @@ namespace DnsSwitcherPro
                     BorderBrush = BrushFromHex(isSelected ? accentColorHex : bgCardStrokeHex),
                     BorderThickness = new Thickness(1.5),
                     CornerRadius = new CornerRadius(14),
-                    Padding = new Thickness(14, 12, 12, 12),
-                    Margin = new Thickness(0, 0, 0, i == serverList.Count - 1 ? 0 : 9),
+                    Padding = new Thickness(14, 9, 12, 9),
+                    Margin = new Thickness(0, 0, 0, i == serverList.Count - 1 ? 0 : 7),
                     Cursor = Cursors.Hand,
                     Child = cardGrid
                 };
@@ -1891,6 +1954,7 @@ namespace DnsSwitcherPro
             return btn;
         }
 
+        // Главное окно настроек с разделением на «Сетевые настройки» и «Кастомизация»
         private void ShowSettingsDialog()
         {
             var dlg = CreateModalDialog("Настройки");
@@ -1915,16 +1979,22 @@ namespace DnsSwitcherPro
                 ShowBenchmarkDialog();
             }));
 
+            root.Children.Add(CreateMenuCard("🌐 Сетевые настройки", "Контроль DNS в браузерах, защита IPv6 (Gemini), DoH, автосортировка", () =>
+            {
+                dlg.Close();
+                ShowNetworkSettingsDialog();
+            }));
+
+            root.Children.Add(CreateMenuCard("🎨 Кастомизация и система", "Выбор темы, светлый/темный режим, автозапуск с Windows", () =>
+            {
+                dlg.Close();
+                ShowCustomizationDialog();
+            }));
+
             root.Children.Add(CreateMenuCard("💾 Бэкап и сброс настроек", "Экспорт/импорт JSON, сброс списка", () =>
             {
                 dlg.Close();
                 ShowBackupDialog();
-            }));
-
-            root.Children.Add(CreateMenuCard("✨ Кастомизация и сеть", "Контроль браузеров, блокировка IPv6, автозапуск, темы", () =>
-            {
-                dlg.Close();
-                ShowCustomizationDialog();
             }));
 
             root.Children.Add(CreateDialogButton("Закрыть", accentColorHex, () => dlg.Close()));
@@ -1979,7 +2049,7 @@ namespace DnsSwitcherPro
             var scroll = new ScrollViewer
             {
                 MaxHeight = 290,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                 Content = listBox
             };
             root.Children.Add(scroll);
@@ -2022,13 +2092,13 @@ namespace DnsSwitcherPro
             dlg.ShowDialog();
         }
 
-        private void ShowCustomizationDialog()
+        // Раздел 1: Сетевые настройки
+        private void ShowNetworkSettingsDialog()
         {
-            var dlg = CreateModalDialog("Кастомизация", () => ShowSettingsDialog());
+            var dlg = CreateModalDialog("Сетевые настройки", () => ShowSettingsDialog());
             var root = new StackPanel();
-            root.Children.Add(CreateDialogHeader("✨ Кастомизация и сеть"));
+            root.Children.Add(CreateDialogHeader("🌐 Сетевые настройки"));
 
-            bool autoStartActive = IsAutoStartEnabled();
             var browserConflicts = CheckBrowserDnsConflicts();
 
             string browserStatusSub = config.AutoFixBrowserDns
@@ -2037,7 +2107,7 @@ namespace DnsSwitcherPro
                     ? $"⚠️ Обнаружен конфликт ({string.Join(", ", browserConflicts.Select(c => c.BrowserName))})! Нажмите для решения"
                     : "Сейчас: Мониторинг активен (конфликтов не обнаружено)");
 
-            root.Children.Add(CreateMenuCard("🌐 Контроль DNS в браузерах (Chrome / Edge / Brave)", browserStatusSub, () =>
+            root.Children.Add(CreateMenuCard("🌐 Контроль DNS в браузерах (Chrome / Edge / Brave / Яндекс)", browserStatusSub, () =>
             {
                 dlg.Close();
                 ShowBrowserControlMenuDialog();
@@ -2053,31 +2123,8 @@ namespace DnsSwitcherPro
                 EnforceIpv6Policy();
                 RefreshSystemState();
                 dlg.Close();
-                ShowCustomizationDialog();
+                ShowNetworkSettingsDialog();
             }, config.BlockIpv6 ? accentColorHex : "#FF5252"));
-
-            root.Children.Add(CreateMenuCard("🚀 Автозапуск вместе с Windows",
-                autoStartActive ? "Сейчас: Включен (автостарт при входе в систему)" : "Сейчас: Отключен", () =>
-            {
-                SetAutoStartTask(!autoStartActive);
-                dlg.Close();
-                ShowCustomizationDialog();
-            }));
-
-            root.Children.Add(CreateMenuCard("🎨 Выбор темы и акцента", "Зеленый, Синий, Фиолетовый, Янтарный", () =>
-            {
-                dlg.Close();
-                ShowThemeChooserDialog();
-            }));
-
-            root.Children.Add(CreateMenuCard("☀️ Режим интерфейса", config.LightMode ? "Сейчас: Светлая тема" : "Сейчас: Темная тема", () =>
-            {
-                config.LightMode = !config.LightMode;
-                SaveConfig();
-                UpdateUIColors();
-                dlg.Close();
-                ShowCustomizationDialog();
-            }));
 
             root.Children.Add(CreateMenuCard("🔒 Нативное шифрование DoH (Windows 11)",
                 config.EnableDohEncryption ? "Сейчас: Включено (https://.../dns-query)" : "Сейчас: Отключено (только классический IPv4)", () =>
@@ -2089,10 +2136,11 @@ namespace DnsSwitcherPro
                     ApplyWindowsDnsServer(config.LastActiveHost);
                 }
                 dlg.Close();
-                ShowCustomizationDialog();
+                ShowNetworkSettingsDialog();
             }));
 
-            root.Children.Add(CreateMenuCard("🔀 Автосортировка по пингу", config.AutoSortPing ? "Сейчас: Включена (быстрые сверху)" : "Сейчас: Отключена", () =>
+            root.Children.Add(CreateMenuCard("🔀 Автосортировка серверов по пингу",
+                config.AutoSortPing ? "Сейчас: Включена (быстрые серверы поднимаются наверх)" : "Сейчас: Отключена", () =>
             {
                 config.AutoSortPing = !config.AutoSortPing;
                 SaveConfig();
@@ -2101,6 +2149,57 @@ namespace DnsSwitcherPro
                     serverList = serverList.OrderBy(s => s.ping > 0 ? s.ping : int.MaxValue).ToList();
                     RenderServerList();
                 }
+                dlg.Close();
+                ShowNetworkSettingsDialog();
+            }));
+
+            root.Children.Add(CreateDialogButton("Назад к настройкам", accentColorHex, () =>
+            {
+                dlg.Close();
+                ShowSettingsDialog();
+            }));
+
+            dlg.Content = new Border
+            {
+                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(20),
+                Padding = new Thickness(22, 18, 22, 18),
+                Child = root
+            };
+            dlg.ShowDialog();
+        }
+
+        // Раздел 2: Кастомизация и система
+        private void ShowCustomizationDialog()
+        {
+            var dlg = CreateModalDialog("Кастомизация и система", () => ShowSettingsDialog());
+            var root = new StackPanel();
+            root.Children.Add(CreateDialogHeader("🎨 Кастомизация и система"));
+
+            bool autoStartActive = IsAutoStartEnabled();
+
+            root.Children.Add(CreateMenuCard("🎨 Выбор темы и неонового акцента", "Зеленый, Синий, Фиолетовый, Янтарный", () =>
+            {
+                dlg.Close();
+                ShowThemeChooserDialog();
+            }));
+
+            root.Children.Add(CreateMenuCard("☀️ Режим оформления интерфейса",
+                config.LightMode ? "Сейчас: Светлая тема" : "Сейчас: Темная тема", () =>
+            {
+                config.LightMode = !config.LightMode;
+                SaveConfig();
+                UpdateUIColors();
+                dlg.Close();
+                ShowCustomizationDialog();
+            }));
+
+            root.Children.Add(CreateMenuCard("🚀 Автозапуск вместе с Windows",
+                autoStartActive ? "Сейчас: Включен (автостарт при входе в систему)" : "Сейчас: Отключен", () =>
+            {
+                SetAutoStartTask(!autoStartActive);
                 dlg.Close();
                 ShowCustomizationDialog();
             }));
@@ -2125,7 +2224,7 @@ namespace DnsSwitcherPro
 
         private void ShowBrowserControlMenuDialog()
         {
-            var dlg = CreateModalDialog("Контроль DNS в браузерах", () => ShowCustomizationDialog());
+            var dlg = CreateModalDialog("Контроль DNS в браузерах", () => ShowNetworkSettingsDialog());
             var root = new StackPanel();
             root.Children.Add(CreateDialogHeader("🌐 Контроль DNS в браузерах"));
 
@@ -2142,14 +2241,14 @@ namespace DnsSwitcherPro
             {
                 dlg.Close();
                 ApplyBrowserDnsAutoFix(silent: false);
-                ShowCustomizationDialog();
+                ShowNetworkSettingsDialog();
             }, accentColorHex));
 
             root.Children.Add(CreateMenuCard("📖 Открыть инструкцию (Как настроить вручную)",
                 "Пошаговое описание и быстрые ссылки для адресной строки", () =>
             {
                 dlg.Close();
-                ShowBrowserManualGuideDialog(returnToCustomization: true);
+                ShowBrowserManualGuideDialog(returnToNetworkSettings: true);
             }));
 
             if (config.AutoFixBrowserDns)
@@ -2159,14 +2258,14 @@ namespace DnsSwitcherPro
                 {
                     RemoveBrowserDnsPolicies();
                     dlg.Close();
-                    ShowCustomizationDialog();
+                    ShowNetworkSettingsDialog();
                 }));
             }
 
-            root.Children.Add(CreateDialogButton("Назад к кастомизации", textSubColorHex, () =>
+            root.Children.Add(CreateDialogButton("Назад к сетевым настройкам", textSubColorHex, () =>
             {
                 dlg.Close();
-                ShowCustomizationDialog();
+                ShowNetworkSettingsDialog();
             }));
 
             dlg.Content = new Border
@@ -2377,7 +2476,7 @@ namespace DnsSwitcherPro
             var scroll = new ScrollViewer
             {
                 MaxHeight = 310,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                 Content = listStack
             };
             root.Children.Add(scroll);
@@ -2503,7 +2602,10 @@ namespace DnsSwitcherPro
             trayIcon.DoubleClick += (s, e) =>
             {
                 Show();
-                WindowState = WindowState.Normal;
+                if (WindowState == WindowState.Minimized)
+                {
+                    WindowState = WindowState.Normal;
+                }
                 RecalculateWindowHeight();
                 Activate();
             };
@@ -2517,7 +2619,10 @@ namespace DnsSwitcherPro
             menu.Items.Add("⚡ Открыть DNS Switcher Pro", null, (s, e) =>
             {
                 Show();
-                WindowState = WindowState.Normal;
+                if (WindowState == WindowState.Minimized)
+                {
+                    WindowState = WindowState.Normal;
+                }
                 RecalculateWindowHeight();
                 Activate();
             });
