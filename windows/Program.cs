@@ -39,10 +39,10 @@ namespace DnsSwitcherPro
         public bool LightMode { get; set; } = false;
         public bool AutoSortPing { get; set; } = true;
         public bool EnableDohEncryption { get; set; } = true;
-        public bool BlockIpv6 { get; set; } = true; // Блокировка IPv6 включена по умолчанию
+        public bool BlockIpv6 { get; set; } = true;
         public bool StartWithWindows { get; set; } = true;
         public bool FirstRunCompleted { get; set; } = false;
-        public string CurrentMode { get; set; } = "off"; // "off", "auto", "on"
+        public string CurrentMode { get; set; } = "off";
         public string LastActiveHost { get; set; } = "dns.comss.one";
         public List<DnsServer> Servers { get; set; } = new();
     }
@@ -67,7 +67,6 @@ namespace DnsSwitcherPro
         private List<DnsServer> serverList = new();
         private const string AutoStartTaskName = "DnsSwitcherProAutoStart";
 
-        // Маркеры для управления доступом к Gemini в системном файле hosts
         private const string HostsBlockStartMarker = "# >>> DNS_SWITCHER_PRO_GEMINI_GUARD_START >>>";
         private const string HostsBlockEndMarker = "# <<< DNS_SWITCHER_PRO_GEMINI_GUARD_END <<<";
 
@@ -88,6 +87,7 @@ namespace DnsSwitcherPro
         private TextBlock listHeader = null!;
         private Border pingBtnBorder = null!;
         private TextBlock pingBtnText = null!;
+        private Border clearGeminiCacheBtn = null!; // Кнопка очистки кук Gemini на главной
 
         // Плашка Undo
         private Border undoBanner = null!;
@@ -97,16 +97,13 @@ namespace DnsSwitcherPro
         private int lastDeletedIndex = -1;
         private DispatcherTimer undoTimer = null!;
 
-        // Таймер-сторож блокировки Gemini при активном IPv6
         private DispatcherTimer ipv6GuardTimer = null!;
         private DateTime lastGeminiBlockNotify = DateTime.MinValue;
         private bool lastKnownHostsBlockState = false;
 
-        // Системный трей
         private Forms.NotifyIcon trayIcon = null!;
         private bool isUpdatingUi = false;
 
-        // Цвета темы
         private string accentColorHex = "#00E676";
         private string accentCardBgHex = "#0D2318";
         private string bgRootHex = "#08080A";
@@ -174,7 +171,6 @@ namespace DnsSwitcherPro
             Directory.CreateDirectory(dir);
             configPath = Path.Combine(dir, "config.json");
 
-            // Автоматический размер окна ровно под содержимое без полосы прокрутки
             Title = "DNS Switcher Pro";
             Width = 435;
             SizeToContent = SizeToContent.Height;
@@ -202,7 +198,6 @@ namespace DnsSwitcherPro
                 undoTimer.Stop();
             };
 
-            // Запуск сторожа, блокирующего приложение и сайт Gemini при активном IPv6
             ipv6GuardTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
             ipv6GuardTimer.Tick += (s, e) => EnforceGeminiIpv6Guard();
             ipv6GuardTimer.Start();
@@ -228,7 +223,56 @@ namespace DnsSwitcherPro
             };
         }
 
-        // Проверка: активен ли сейчас протокол IPv6 в настройках или на сетевой карте
+        // Функция автоматической очистки Cookies и кэша Gemini в браузерах пользователя
+        private void ClearGeminiCookiesAndCache()
+        {
+            try
+            {
+                string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                string[] browserPaths = new[]
+                {
+                    Path.Combine(localAppData, @"Google\Chrome\User Data\Default"),
+                    Path.Combine(localAppData, @"Microsoft\Edge\User Data\Default"),
+                    Path.Combine(localAppData, @"BraveSoftware\Brave-Browser\User Data\Default")
+                };
+
+                int cleanedCount = 0;
+                foreach (string bPath in browserPaths)
+                {
+                    if (!Directory.Exists(bPath)) continue;
+
+                    // Удаляем файлы Network/Cookies и Local Storage для домена google.com
+                    string networkDir = Path.Combine(bPath, "Network");
+                    string cookiesFile = Path.Combine(networkDir, "Cookies");
+                    if (File.Exists(cookiesFile))
+                    {
+                        try { File.Delete(cookiesFile); cleanedCount++; } catch { }
+                    }
+
+                    string storageDir = Path.Combine(bPath, "Local Storage", "leveldb");
+                    if (Directory.Exists(storageDir))
+                    {
+                        foreach (var file in Directory.GetFiles(storageDir))
+                        {
+                            try { File.Delete(file); cleanedCount++; } catch { }
+                        }
+                    }
+                }
+
+                MessageBox.Show(
+                    cleanedCount > 0
+                        ? "✅ Кэш и куки Google/Gemini успешно очищены!\nПерезапустите браузер или вкладку Gemini."
+                        : "ℹ️ Браузеры не запущены или файлы куки не найдены.",
+                    "Очистка Gemini Cache",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Ошибка при очистке кэша: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
         private bool IsIpv6CurrentlyEnabled()
         {
             if (!config.BlockIpv6) return true;
@@ -251,12 +295,10 @@ namespace DnsSwitcherPro
             return false;
         }
 
-        // Блокировка сайта Gemini в файле hosts и закрытие приложения Gemini при включенном IPv6
         private void EnforceGeminiIpv6Guard()
         {
             bool ipv6Enabled = IsIpv6CurrentlyEnabled();
 
-            // Обновляем правила в hosts при изменении статуса IPv6
             if (ipv6Enabled != lastKnownHostsBlockState)
             {
                 UpdateGeminiHostsRule(blockCompletely: ipv6Enabled);
@@ -265,7 +307,6 @@ namespace DnsSwitcherPro
 
             if (!ipv6Enabled) return;
 
-            // Если IPv6 включен — не даем запуститься ни приложению Gemini, ни вкладке/PWA Gemini
             try
             {
                 foreach (var proc in Process.GetProcesses())
@@ -319,7 +360,6 @@ namespace DnsSwitcherPro
                 Forms.ToolTipIcon.Warning);
         }
 
-        // Запись правил в системный файл C:\Windows\System32\drivers\etc\hosts
         private void UpdateGeminiHostsRule(bool blockCompletely)
         {
             try
@@ -352,7 +392,6 @@ namespace DnsSwitcherPro
                 cleaned.Add(HostsBlockStartMarker);
                 if (blockCompletely)
                 {
-                    // Полная блокировка сайта и веб-приложения Gemini при включенном IPv6
                     cleaned.Add("0.0.0.0 gemini.google.com");
                     cleaned.Add("0.0.0.0 www.gemini.google.com");
                     cleaned.Add("0.0.0.0 aistudio.google.com");
@@ -362,7 +401,6 @@ namespace DnsSwitcherPro
                 }
                 else
                 {
-                    // В режиме IPv4 Only блокируем только IPv6-резолвинг для Gemini, разрешая IPv4
                     cleaned.Add("::1 gemini.google.com");
                     cleaned.Add("::1 www.gemini.google.com");
                 }
@@ -374,7 +412,6 @@ namespace DnsSwitcherPro
             catch { }
         }
 
-        // Блокировка IPv6 и разрешение трафика и DNS-запросов строго по IPv4
         private void EnforceIpv6Policy()
         {
             var nic = GetActiveNetworkInterface();
@@ -419,7 +456,6 @@ namespace DnsSwitcherPro
                 }
                 catch { }
 
-                // При включении IPv6 сразу блокируем сайт и приложение Gemini
                 UpdateGeminiHostsRule(blockCompletely: true);
                 lastKnownHostsBlockState = true;
                 Dispatcher.Invoke(EnforceGeminiIpv6Guard);
@@ -536,7 +572,6 @@ namespace DnsSwitcherPro
 
         private void SetupUI()
         {
-            // Ползунок прокрутки по правому краю полностью отключен (Hidden)
             rootScroll = new ScrollViewer
             {
                 VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
@@ -615,7 +650,7 @@ namespace DnsSwitcherPro
             netStatusBorder.MouseLeftButtonUp += (s, e) => VerifyActiveDnsInternet();
             mainLayout.Children.Add(netStatusBorder);
 
-            // Карточка системного режима (Выкл / Авто / Вкл)
+            // Карточка системного режима
             var modeInner = new StackPanel();
             modeTitle = new TextBlock
             {
@@ -695,10 +730,34 @@ namespace DnsSwitcherPro
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(16),
                 Padding = new Thickness(16, 14, 16, 14),
-                Margin = new Thickness(0, 0, 0, 18),
+                Margin = new Thickness(0, 0, 0, 14),
                 Child = modeInner
             };
             mainLayout.Children.Add(modeCard);
+
+            // Кнопка принудительной очистки кэша/куки Gemini на главной панели
+            var clearGeminiText = new TextBlock
+            {
+                Text = "🧹 Очистить кэш и куки Gemini (Решить проблему региона)",
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = BrushFromHex(accentColorHex),
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+
+            clearGeminiCacheBtn = new Border
+            {
+                Background = BrushFromHex(accentCardBgHex),
+                BorderBrush = BrushFromHex(accentColorHex),
+                BorderThickness = new Thickness(1.5),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(14, 10, 14, 10),
+                Margin = new Thickness(0, 0, 0, 18),
+                Cursor = Cursors.Hand,
+                Child = clearGeminiText
+            };
+            clearGeminiCacheBtn.MouseLeftButtonUp += (s, e) => ClearGeminiCookiesAndCache();
+            mainLayout.Children.Add(clearGeminiCacheBtn);
 
             // Заголовок списка + кнопка пинга
             var headerGrid = new Grid { Margin = new Thickness(0, 0, 0, 12) };
@@ -860,6 +919,9 @@ namespace DnsSwitcherPro
             pingBtnBorder.Background = BrushFromHex(accentCardBgHex);
             pingBtnBorder.BorderBrush = BrushFromHex(accentColorHex);
             pingBtnText.Foreground = BrushFromHex(accentColorHex);
+            clearGeminiCacheBtn.Background = BrushFromHex(accentCardBgHex);
+            clearGeminiCacheBtn.BorderBrush = BrushFromHex(accentColorHex);
+            ((TextBlock)clearGeminiCacheBtn.Child).Foreground = BrushFromHex(accentColorHex);
             undoBanner.Background = BrushFromHex(bgCardHex);
             undoBanner.BorderBrush = BrushFromHex(accentColorHex);
             undoText.Foreground = BrushFromHex(textMainColorHex);
@@ -1255,7 +1317,6 @@ namespace DnsSwitcherPro
                 listContainer.Children.Add(cardBorder);
             }
 
-            // Пересчитываем высоту окна ровно по содержимому
             SizeToContent = SizeToContent.Manual;
             SizeToContent = SizeToContent.Height;
         }
