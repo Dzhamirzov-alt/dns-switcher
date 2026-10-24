@@ -49,6 +49,7 @@ namespace DnsSwitcherPro
         public bool EnableDohEncryption { get; set; } = true;
         public bool BlockIpv6 { get; set; } = true;
         public bool AutoFixBrowserDns { get; set; } = false;
+        public bool EnableDpiBypass { get; set; } = false;
         public bool StartWithWindows { get; set; } = true;
         public bool FirstRunCompleted { get; set; } = false;
         public string CurrentMode { get; set; } = "off";
@@ -79,6 +80,8 @@ namespace DnsSwitcherPro
         private const string HostsBlockStartMarker = "# >>> DNS_SWITCHER_PRO_GEMINI_GUARD_START >>>";
         private const string HostsBlockEndMarker = "# <<< DNS_SWITCHER_PRO_GEMINI_GUARD_END <<<";
 
+        private Process? dpiProcess = null;
+
         // Элементы интерфейса
         private ScrollViewer rootScroll = null!;
         private StackPanel mainLayout = null!;
@@ -97,6 +100,8 @@ namespace DnsSwitcherPro
         private Border pingBtnBorder = null!;
         private TextBlock pingBtnText = null!;
         private Border clearGeminiCacheBtn = null!;
+        private Border dpiBypassBtn = null!; // Кнопка обхода DPI на главной панели
+        private TextBlock dpiBypassText = null!;
 
         // Плашка предупреждения о конфликте DNS в браузере
         private Border browserWarningBanner = null!;
@@ -186,11 +191,10 @@ namespace DnsSwitcherPro
             Directory.CreateDirectory(dir);
             configPath = Path.Combine(dir, "config.json");
 
-            // Поддержка изменения размера окна мышкой, разворачивания во весь экран и аккуратной автовысоты
             Title = "DNS Switcher Pro";
             Width = 440;
             MinWidth = 400;
-            MinHeight = 420;
+            MinHeight = 440;
             ResizeMode = ResizeMode.CanResize;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
 
@@ -237,6 +241,12 @@ namespace DnsSwitcherPro
                     await Task.Run(() => SetAutoStartTask(true));
                 }
 
+                // Управление встроенным движком Zapret DPI при запуске
+                if (config.EnableDpiBypass)
+                {
+                    StartDpiBypass();
+                }
+
                 await Task.Run(() => EnforceIpv6Policy());
 
                 DetectInitialSystemMode();
@@ -244,7 +254,6 @@ namespace DnsSwitcherPro
                 CheckNetworkAndTestAll();
 
                 ipv6GuardTimer.Start();
-
                 MonitorBrowserDnsSettings(showPopupOnConflict: !launchMinimized);
 
                 if (launchMinimized)
@@ -253,13 +262,14 @@ namespace DnsSwitcherPro
                     trayIcon.ShowBalloonTip(
                         2000,
                         "⚡ DNS Switcher Pro активен",
-                        "Защита DNS и режим IPv4 Only работают в фоновом режиме.",
+                        "Защита DNS, IPv4 Only и обход DPI работают в фоновом режиме.",
                         Forms.ToolTipIcon.Info);
                 }
             };
 
             Closing += (s, e) =>
             {
+                StopDpiBypass();
                 e.Cancel = true;
                 Hide();
                 trayIcon.ShowBalloonTip(
@@ -270,9 +280,94 @@ namespace DnsSwitcherPro
             };
         }
 
-        // Автоматический расчёт высоты окна:
-        // Если серверы помещаются на экране (например, стандартные 7 серверов) — окно аккуратно подстраивается под них без ползунка.
-        // Если серверов много и они не помещаются по высоте экрана — окно ограничивается высотой рабочей области и включает ползунок.
+        // Управление встроенным движком обхода DPI (Zapret winws.exe)
+        private void StartDpiBypass()
+        {
+            try
+            {
+                StopDpiBypass();
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                string winwsPath = Path.Combine(baseDir, "dpi", "winws.exe");
+                if (!File.Exists(winwsPath)) return;
+
+                // Современная универсальная стратегия обхода ТСПУ для HTTPS (SNI) и UDP/QUIC (YouTube / Discord)
+                string args = "--wf-tcp=80,443 --wf-udp=443 --dpi-desync=fake --dpi-desync-split-pos=1 --dpi-desync-fooling=md5sig";
+
+                var psi = new ProcessStartInfo(winwsPath, args)
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    WorkingDirectory = Path.Combine(baseDir, "dpi")
+                };
+
+                dpiProcess = Process.Start(psi);
+                config.EnableDpiBypass = true;
+                SaveConfig();
+                UpdateDpiButtonVisualState();
+            }
+            catch { }
+        }
+
+        private void StopDpiBypass()
+        {
+            try
+            {
+                if (dpiProcess != null && !dpiProcess.HasExited)
+                {
+                    dpiProcess.Kill();
+                    dpiProcess.Dispose();
+                }
+                dpiProcess = null;
+
+                // Также принудительно гасим зависшие экземпляры winws
+                foreach (var p in Process.GetProcessesByName("winws"))
+                {
+                    try { p.Kill(); } catch { }
+                }
+            }
+            catch { }
+        }
+
+        private void ToggleDpiBypass()
+        {
+            if (config.EnableDpiBypass)
+            {
+                StopDpiBypass();
+                config.EnableDpiBypass = false;
+                SaveConfig();
+                UpdateDpiButtonVisualState();
+                MessageBox.Show("🛡️ Обход DPI отключен.", "DNS Switcher Pro", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            else
+            {
+                StartDpiBypass();
+                config.EnableDpiBypass = true;
+                SaveConfig();
+                UpdateDpiButtonVisualState();
+                MessageBox.Show("🛡️ Обход DPI успешно запущен!\nТрафик сайтов, YouTube и Discord оптимизирован.", "DNS Switcher Pro", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+        }
+
+        private void UpdateDpiButtonVisualState()
+        {
+            if (dpiBypassText == null || dpiBypassBtn == null) return;
+            if (config.EnableDpiBypass)
+            {
+                dpiBypassText.Text = "🛡️ Обход DPI: ВКЛЮЧЕН (YouTube, Discord, Сайты)";
+                dpiBypassText.Foreground = BrushFromHex(accentColorHex);
+                dpiBypassBtn.Background = BrushFromHex(accentCardBgHex);
+                dpiBypassBtn.BorderBrush = BrushFromHex(accentColorHex);
+            }
+            else
+            {
+                dpiBypassText.Text = "🛡️ Обход DPI: ОТКЛЮЧЕН (Нажмите для включения)";
+                dpiBypassText.Foreground = BrushFromHex(textSubColorHex);
+                dpiBypassBtn.Background = BrushFromHex(bgCardHex);
+                dpiBypassBtn.BorderBrush = BrushFromHex(bgCardStrokeHex);
+            }
+        }
+
         private void RecalculateWindowHeight()
         {
             if (mainLayout == null || rootScroll == null) return;
@@ -292,7 +387,6 @@ namespace DnsSwitcherPro
 
                 mainLayout.Measure(new System.Windows.Size(measureWidth, double.PositiveInfinity));
 
-                // Высота содержимого + высота системного заголовка и рамок окна Windows (~42px)
                 double desiredWindowHeight = mainLayout.DesiredSize.Height + 42;
                 double maxWorkAreaHeight = SystemParameters.WorkArea.Height - 20;
 
@@ -320,7 +414,6 @@ namespace DnsSwitcherPro
             }
         }
 
-        // Динамическое отображение ползунка при ручном изменении размера окна пользователем
         private void UpdateScrollBarVisibility()
         {
             if (rootScroll == null || isRecalculatingHeight) return;
@@ -986,7 +1079,6 @@ namespace DnsSwitcherPro
                 Background = BrushFromHex(bgRootHex)
             };
 
-            // Отслеживаем соотношение высоты контента и окна (для ручного изменения размера мышкой или добавления многих серверов)
             rootScroll.ScrollChanged += (s, e) => UpdateScrollBarVisibility();
 
             mainLayout = new StackPanel
@@ -1177,7 +1269,7 @@ namespace DnsSwitcherPro
             };
             mainLayout.Children.Add(modeCard);
 
-            // Кнопка принудительной очистки кэша/куки Gemini на главной панели
+            // Кнопка очистки кэша/куки Gemini
             var clearGeminiText = new TextBlock
             {
                 Text = "🧹 Очистить кэш и куки Gemini (Решить проблему региона)",
@@ -1194,12 +1286,33 @@ namespace DnsSwitcherPro
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(12),
                 Padding = new Thickness(14, 9, 14, 9),
-                Margin = new Thickness(0, 0, 0, 14),
+                Margin = new Thickness(0, 0, 0, 8),
                 Cursor = Cursors.Hand,
                 Child = clearGeminiText
             };
             clearGeminiCacheBtn.MouseLeftButtonUp += (s, e) => ClearGeminiCookiesAndCache();
             mainLayout.Children.Add(clearGeminiCacheBtn);
+
+            // Кнопка переключения обхода DPI на главной панели
+            dpiBypassText = new TextBlock
+            {
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+
+            dpiBypassBtn = new Border
+            {
+                CornerRadius = new CornerRadius(12),
+                BorderThickness = new Thickness(1.5),
+                Padding = new Thickness(14, 9, 14, 9),
+                Margin = new Thickness(0, 0, 0, 14),
+                Cursor = Cursors.Hand,
+                Child = dpiBypassText
+            };
+            dpiBypassBtn.MouseLeftButtonUp += (s, e) => ToggleDpiBypass();
+            UpdateDpiButtonVisualState();
+            mainLayout.Children.Add(dpiBypassBtn);
 
             // Заголовок списка + кнопка пинга
             var headerGrid = new Grid { Margin = new Thickness(0, 0, 0, 10) };
@@ -1364,6 +1477,7 @@ namespace DnsSwitcherPro
             clearGeminiCacheBtn.Background = BrushFromHex(accentCardBgHex);
             clearGeminiCacheBtn.BorderBrush = BrushFromHex(accentColorHex);
             ((TextBlock)clearGeminiCacheBtn.Child).Foreground = BrushFromHex(accentColorHex);
+            UpdateDpiButtonVisualState();
             undoBanner.Background = BrushFromHex(bgCardHex);
             undoBanner.BorderBrush = BrushFromHex(accentColorHex);
             undoText.Foreground = BrushFromHex(textMainColorHex);
@@ -1954,7 +2068,6 @@ namespace DnsSwitcherPro
             return btn;
         }
 
-        // Главное окно настроек с разделением на «Сетевые настройки» и «Кастомизация»
         private void ShowSettingsDialog()
         {
             var dlg = CreateModalDialog("Настройки");
@@ -1979,13 +2092,13 @@ namespace DnsSwitcherPro
                 ShowBenchmarkDialog();
             }));
 
-            root.Children.Add(CreateMenuCard("🌐 Сетевые настройки", "Контроль DNS в браузерах, защита IPv6 (Gemini), DoH, автосортировка", () =>
+            root.Children.Add(CreateMenuCard("🌐 Сетевые настройки", "Обход DPI, контроль браузеров, защита IPv6, DoH", () =>
             {
                 dlg.Close();
                 ShowNetworkSettingsDialog();
             }));
 
-            root.Children.Add(CreateMenuCard("🎨 Кастомизация и система", "Выбор темы, светлый/темный режим, автозапуск с Windows", () =>
+            root.Children.Add(CreateMenuCard("🎨 Кастомизация и система", "Выбор темы, светлый/темный режим, автозапуск", () =>
             {
                 dlg.Close();
                 ShowCustomizationDialog();
@@ -2092,7 +2205,7 @@ namespace DnsSwitcherPro
             dlg.ShowDialog();
         }
 
-        // Раздел 1: Сетевые настройки
+        // Сетевые настройки с управлением обходом DPI
         private void ShowNetworkSettingsDialog()
         {
             var dlg = CreateModalDialog("Сетевые настройки", () => ShowSettingsDialog());
@@ -2106,6 +2219,14 @@ namespace DnsSwitcherPro
                 : (browserConflicts.Count > 0
                     ? $"⚠️ Обнаружен конфликт ({string.Join(", ", browserConflicts.Select(c => c.BrowserName))})! Нажмите для решения"
                     : "Сейчас: Мониторинг активен (конфликтов не обнаружено)");
+
+            root.Children.Add(CreateMenuCard("🛡️ Обход DPI (Zapret)",
+                config.EnableDpiBypass ? "Сейчас: Включен (YouTube, Discord, сайты активны)" : "Сейчас: Отключен", () =>
+            {
+                ToggleDpiBypass();
+                dlg.Close();
+                ShowNetworkSettingsDialog();
+            }, config.EnableDpiBypass ? accentColorHex : null));
 
             root.Children.Add(CreateMenuCard("🌐 Контроль DNS в браузерах (Chrome / Edge / Brave / Яндекс)", browserStatusSub, () =>
             {
@@ -2171,7 +2292,6 @@ namespace DnsSwitcherPro
             dlg.ShowDialog();
         }
 
-        // Раздел 2: Кастомизация и система
         private void ShowCustomizationDialog()
         {
             var dlg = CreateModalDialog("Кастомизация и система", () => ShowSettingsDialog());
@@ -2642,6 +2762,7 @@ namespace DnsSwitcherPro
             menu.Items.Add(new Forms.ToolStripSeparator());
             menu.Items.Add("Выход", null, (s, e) =>
             {
+                StopDpiBypass();
                 trayIcon.Visible = false;
                 Environment.Exit(0);
             });
