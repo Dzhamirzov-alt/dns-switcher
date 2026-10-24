@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -99,7 +98,7 @@ namespace DnsSwitcherPro
         private TextBlock pingBtnText = null!;
         private Border clearGeminiCacheBtn = null!;
 
-        // Плашка предупреждения о конфликте DNS в браузере на главной панели
+        // Плашка предупреждения о конфликте DNS в браузере
         private Border browserWarningBanner = null!;
         private TextBlock browserWarningText = null!;
 
@@ -229,7 +228,6 @@ namespace DnsSwitcherPro
                 RefreshSystemState();
                 CheckNetworkAndTestAll();
 
-                // Проверяем настройки Безопасного DNS в браузерах при запуске
                 MonitorBrowserDnsSettings(showPopupOnConflict: !launchMinimized);
 
                 if (launchMinimized)
@@ -252,7 +250,47 @@ namespace DnsSwitcherPro
             SizeToContent = SizeToContent.Height;
         }
 
-        // Список поддерживаемых браузеров для мониторинга и автонастройки DoH
+        // Загрузка оригинальной иконки из файла icon.ico или напрямую из ресурсов исполняемого файла .exe
+        private Icon LoadAppCustomIcon()
+        {
+            try
+            {
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                string icoPath = Path.Combine(baseDir, "icon.ico");
+                if (File.Exists(icoPath))
+                {
+                    return new Icon(icoPath);
+                }
+
+                string exePath = Process.GetCurrentProcess().MainModule?.FileName ?? "";
+                if (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
+                {
+                    var extracted = System.Drawing.Icon.ExtractAssociatedIcon(exePath);
+                    if (extracted != null) return extracted;
+                }
+            }
+            catch { }
+
+            return SystemIcons.Shield;
+        }
+
+        private void ApplyCustomWindowAndTrayIcon()
+        {
+            try
+            {
+                using var sysIcon = LoadAppCustomIcon();
+                Icon = Imaging.CreateBitmapSourceFromHIcon(
+                    sysIcon.Handle,
+                    Int32Rect.Empty,
+                    BitmapSizeOptions.FromEmptyOptions());
+                if (trayIcon != null)
+                {
+                    trayIcon.Icon = LoadAppCustomIcon();
+                }
+            }
+            catch { }
+        }
+
         private List<(string Name, string LocalStatePath, string PolicyPath)> GetInstalledBrowsersTargetList()
         {
             string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -269,7 +307,6 @@ namespace DnsSwitcherPro
             };
         }
 
-        // Проверка: переопределяет ли браузер системный DNS своим собственным сервером
         private List<BrowserConflictInfo> CheckBrowserDnsConflicts()
         {
             var conflicts = new List<BrowserConflictInfo>();
@@ -278,7 +315,6 @@ namespace DnsSwitcherPro
             {
                 if (!File.Exists(b.LocalStatePath)) continue;
 
-                // Проверяем, не установлена ли уже наша групповая политика "automatic" в реестре
                 bool policyEnforced = false;
                 try
                 {
@@ -305,8 +341,6 @@ namespace DnsSwitcherPro
                         string mode = dohNode["mode"]?.GetValue<string>() ?? "";
                         string templates = dohNode["templates"]?.GetValue<string>() ?? "";
 
-                        // Если в браузере выбран режим "secure" (сторонний провайдер) или прописан кастомный шаблон DoH,
-                        // и при этом политика еще не перекрыла его — это конфликт!
                         if ((mode.Equals("secure", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrWhiteSpace(templates)) && !policyEnforced)
                         {
                             conflicts.Add(new BrowserConflictInfo
@@ -325,7 +359,6 @@ namespace DnsSwitcherPro
             return conflicts;
         }
 
-        // Мониторинг конфликтов DNS в браузерах и обновление баннера/окна предупреждения
         private void MonitorBrowserDnsSettings(bool showPopupOnConflict)
         {
             if (config.AutoFixBrowserDns)
@@ -366,7 +399,6 @@ namespace DnsSwitcherPro
             }
         }
 
-        // Автоматическая настройка браузеров на использование системного DNS Windows
         private void ApplyBrowserDnsAutoFix(bool silent = false)
         {
             int fixedCount = 0;
@@ -375,8 +407,6 @@ namespace DnsSwitcherPro
             {
                 if (!File.Exists(b.LocalStatePath)) continue;
 
-                // 1. Прописываем системную политику для Chromium-браузеров:
-                // режим "automatic" заставляет браузер использовать текущего поставщика услуг (системный DNS Windows)
                 try
                 {
                     using var polKey = Registry.LocalMachine.CreateSubKey(b.PolicyPath, true);
@@ -386,7 +416,6 @@ namespace DnsSwitcherPro
                 }
                 catch { }
 
-                // 2. Очищаем кастомный шаблон в файле Local State браузера
                 try
                 {
                     string jsonText;
@@ -428,7 +457,6 @@ namespace DnsSwitcherPro
             }
         }
 
-        // Снятие принудительных политик браузера (если пользователь захочет управлять вручную)
         private void RemoveBrowserDnsPolicies()
         {
             foreach (var b in GetInstalledBrowsersTargetList())
@@ -446,7 +474,6 @@ namespace DnsSwitcherPro
             MonitorBrowserDnsSettings(showPopupOnConflict: false);
         }
 
-        // Окно предупреждения о конфликте Безопасного DNS в браузере + выбор (Автоисправление или Инструкция)
         private void ShowBrowserDnsWarningDialog(List<BrowserConflictInfo> conflicts)
         {
             var dlg = CreateModalDialog("Конфликт DNS в браузере");
@@ -505,7 +532,6 @@ namespace DnsSwitcherPro
             dlg.ShowDialog();
         }
 
-        // Подробная инструкция по ручной настройке Безопасного DNS в браузерах с кнопками копирования адресов
         private void ShowBrowserManualGuideDialog(bool returnToCustomization = false)
         {
             var dlg = CreateModalDialog("Инструкция для браузера", () =>
@@ -540,7 +566,6 @@ namespace DnsSwitcherPro
             };
             root.Children.Add(guideBox);
 
-            // Кнопки быстрого копирования ссылок в буфер обмена
             var links = new (string Label, string Url)[]
             {
                 ("📋 Скопировать для Chrome: chrome://settings/security", "chrome://settings/security"),
@@ -582,7 +607,6 @@ namespace DnsSwitcherPro
             dlg.ShowDialog();
         }
 
-        // Функция автоматической очистки Cookies и кэша Gemini в браузерах пользователя
         private void ClearGeminiCookiesAndCache()
         {
             try
@@ -821,55 +845,6 @@ namespace DnsSwitcherPro
             }
         }
 
-        private Icon CreateCyberShieldIcon()
-        {
-            using var bmp = new Bitmap(64, 64);
-            using (var g = Graphics.FromImage(bmp))
-            {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.Clear(System.Drawing.Color.FromArgb(10, 12, 16));
-
-                var neonColor = ColorTranslator.FromHtml(accentColorHex);
-                using var bgBrush = new SolidBrush(System.Drawing.Color.FromArgb(22, 26, 34));
-                using var neonPen = new System.Drawing.Pen(neonColor, 4f) { LineJoin = LineJoin.Round };
-
-                var shieldPts = new System.Drawing.PointF[]
-                {
-                    new(32, 6),
-                    new(54, 15),
-                    new(54, 34),
-                    new(32, 58),
-                    new(10, 34),
-                    new(10, 15)
-                };
-
-                g.FillPolygon(bgBrush, shieldPts);
-                g.DrawPolygon(neonPen, shieldPts);
-
-                using var lockPen = new System.Drawing.Pen(neonColor, 3f);
-                g.DrawArc(lockPen, 25, 19, 14, 14, 180, 180);
-                g.DrawRectangle(lockPen, 22, 27, 20, 15);
-            }
-            return System.Drawing.Icon.FromHandle(bmp.GetHicon());
-        }
-
-        private void ApplyCustomWindowAndTrayIcon()
-        {
-            try
-            {
-                using var sysIcon = CreateCyberShieldIcon();
-                Icon = Imaging.CreateBitmapSourceFromHIcon(
-                    sysIcon.Handle,
-                    Int32Rect.Empty,
-                    BitmapSizeOptions.FromEmptyOptions());
-                if (trayIcon != null)
-                {
-                    trayIcon.Icon = CreateCyberShieldIcon();
-                }
-            }
-            catch { }
-        }
-
         private bool IsAutoStartEnabled()
         {
             try
@@ -1009,7 +984,7 @@ namespace DnsSwitcherPro
             netStatusBorder.MouseLeftButtonUp += (s, e) => VerifyActiveDnsInternet();
             mainLayout.Children.Add(netStatusBorder);
 
-            // Сигнальная плашка конфликта DNS в браузере (появляется автоматически при обнаружении проблемы)
+            // Сигнальная плашка конфликта DNS в браузере
             browserWarningText = new TextBlock
             {
                 Text = "⚠️ Конфликт Безопасного DNS в браузере! Нажмите для решения",
@@ -1298,7 +1273,6 @@ namespace DnsSwitcherPro
         private void UpdateUIColors()
         {
             ApplyThemePalette();
-            ApplyCustomWindowAndTrayIcon();
             rootScroll.Background = BrushFromHex(bgRootHex);
             titleApp.Foreground = BrushFromHex(accentColorHex);
             settingsBtn.Background = BrushFromHex(gearBgHex);
@@ -2508,7 +2482,7 @@ namespace DnsSwitcherPro
         {
             trayIcon = new Forms.NotifyIcon
             {
-                Icon = CreateCyberShieldIcon(),
+                Icon = LoadAppCustomIcon(),
                 Visible = true,
                 Text = "DNS Switcher Pro (IPv4 Only)"
             };
