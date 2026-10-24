@@ -112,7 +112,7 @@ namespace DnsSwitcherPro
 
         private DispatcherTimer ipv6GuardTimer = null!;
         private DateTime lastGeminiBlockNotify = DateTime.MinValue;
-        private bool lastKnownHostsBlockState = false;
+        private bool? lastKnownHostsBlockState = null;
         private bool browserWarningShownThisSession = false;
 
         private Forms.NotifyIcon trayIcon = null!;
@@ -198,13 +198,6 @@ namespace DnsSwitcherPro
             SetupUI();
             SetupTrayIcon();
 
-            if (!config.FirstRunCompleted)
-            {
-                config.FirstRunCompleted = true;
-                SetAutoStartTask(config.StartWithWindows);
-                SaveConfig();
-            }
-
             undoTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
             undoTimer.Tick += (s, e) =>
             {
@@ -219,20 +212,35 @@ namespace DnsSwitcherPro
                 EnforceGeminiIpv6Guard();
                 MonitorBrowserDnsSettings(showPopupOnConflict: false);
             };
-            ipv6GuardTimer.Start();
 
             Loaded += async (s, e) =>
             {
+                // Гарантируем создание/восстановление автозапуска при каждом старте, если он включен
+                if (config.StartWithWindows)
+                {
+                    await Task.Run(() => SetAutoStartTask(true));
+                }
+
+                // Сначала применяем политику IPv4 и очищаем hosts от старых записей ::1
                 await Task.Run(() => EnforceIpv6Policy());
+
                 DetectInitialSystemMode();
                 RefreshSystemState();
                 CheckNetworkAndTestAll();
+
+                // Запускаем таймер мониторинга только после полной инициализации сети
+                ipv6GuardTimer.Start();
 
                 MonitorBrowserDnsSettings(showPopupOnConflict: !launchMinimized);
 
                 if (launchMinimized)
                 {
                     Hide();
+                    trayIcon.ShowBalloonTip(
+                        2000,
+                        "⚡ DNS Switcher Pro активен",
+                        "Защита DNS и режим IPv4 Only работают в фоновом режиме.",
+                        Forms.ToolTipIcon.Info);
                 }
             };
 
@@ -240,7 +248,11 @@ namespace DnsSwitcherPro
             {
                 e.Cancel = true;
                 Hide();
-                trayIcon.ShowBalloonTip(1500, "DNS Switcher Pro", "Приложение работает в фоне. Правый клик по иконке — быстрое переключение DNS.", Forms.ToolTipIcon.Info);
+                trayIcon.ShowBalloonTip(
+                    1500,
+                    "DNS Switcher Pro",
+                    "Приложение работает в фоне. Правый клик по иконке — быстрое переключение DNS.",
+                    Forms.ToolTipIcon.Info);
             };
         }
 
@@ -250,7 +262,6 @@ namespace DnsSwitcherPro
             SizeToContent = SizeToContent.Height;
         }
 
-        // Загрузка оригинальной иконки из файла icon.ico или напрямую из ресурсов исполняемого файла .exe
         private Icon LoadAppCustomIcon()
         {
             try
@@ -656,33 +667,21 @@ namespace DnsSwitcherPro
             }
         }
 
+        // Проверка: включен ли IPv6
         private bool IsIpv6CurrentlyEnabled()
         {
-            if (!config.BlockIpv6) return true;
+            // Если в настройках включена блокировка IPv6 (режим IPv4 Only),
+            // программа сама держит IPv6 отключенным — блокировать Gemini НЕ нужно
+            if (config.BlockIpv6) return false;
 
-            try
-            {
-                var nic = GetActiveNetworkInterface();
-                if (nic != null && nic.Supports(NetworkInterfaceComponent.IPv6))
-                {
-                    var ipProps = nic.GetIPProperties();
-                    bool hasGlobalIpv6 = ipProps.UnicastAddresses.Any(u =>
-                        u.Address.AddressFamily == AddressFamily.InterNetworkV6 &&
-                        !u.Address.IsIPv6LinkLocal &&
-                        !IPAddress.IsLoopback(u.Address));
-                    if (hasGlobalIpv6) return true;
-                }
-            }
-            catch { }
-
-            return false;
+            return true;
         }
 
         private void EnforceGeminiIpv6Guard()
         {
             bool ipv6Enabled = IsIpv6CurrentlyEnabled();
 
-            if (ipv6Enabled != lastKnownHostsBlockState)
+            if (lastKnownHostsBlockState == null || ipv6Enabled != lastKnownHostsBlockState.Value)
             {
                 UpdateGeminiHostsRule(blockCompletely: ipv6Enabled);
                 lastKnownHostsBlockState = ipv6Enabled;
@@ -743,6 +742,9 @@ namespace DnsSwitcherPro
                 Forms.ToolTipIcon.Warning);
         }
 
+        // Обновление файла hosts:
+        // Когда IPv6 выключен (blockCompletely == false) — ПОЛНОСТЬЮ очищаем hosts от любых правил для Gemini!
+        // Когда IPv6 включен (blockCompletely == true) — блокируем доступ к сайту Gemini через 0.0.0.0.
         private void UpdateGeminiHostsRule(bool blockCompletely)
         {
             try
@@ -756,14 +758,21 @@ namespace DnsSwitcherPro
 
                 foreach (var line in lines)
                 {
-                    if (line.Trim() == HostsBlockStartMarker)
+                    string trimmed = line.Trim();
+                    if (trimmed == HostsBlockStartMarker)
                     {
                         insideBlock = true;
                         continue;
                     }
-                    if (line.Trim() == HostsBlockEndMarker)
+                    if (trimmed == HostsBlockEndMarker)
                     {
                         insideBlock = false;
+                        continue;
+                    }
+                    // Также удаляем любые старые остаточные строки ::1 или 0.0.0.0 для gemini.google.com
+                    if (trimmed.Contains("gemini.google.com", StringComparison.OrdinalIgnoreCase) ||
+                        trimmed.Contains("aistudio.google.com", StringComparison.OrdinalIgnoreCase))
+                    {
                         continue;
                     }
                     if (!insideBlock)
@@ -772,22 +781,15 @@ namespace DnsSwitcherPro
                     }
                 }
 
-                cleaned.Add(HostsBlockStartMarker);
+                // Записываем блокировку ТОЛЬКО если включен IPv6 (blockCompletely == true)
                 if (blockCompletely)
                 {
+                    cleaned.Add(HostsBlockStartMarker);
                     cleaned.Add("0.0.0.0 gemini.google.com");
                     cleaned.Add("0.0.0.0 www.gemini.google.com");
                     cleaned.Add("0.0.0.0 aistudio.google.com");
-                    cleaned.Add("::1 gemini.google.com");
-                    cleaned.Add("::1 www.gemini.google.com");
-                    cleaned.Add("::1 aistudio.google.com");
+                    cleaned.Add(HostsBlockEndMarker);
                 }
-                else
-                {
-                    cleaned.Add("::1 gemini.google.com");
-                    cleaned.Add("::1 www.gemini.google.com");
-                }
-                cleaned.Add(HostsBlockEndMarker);
 
                 File.WriteAllLines(hostsPath, cleaned, Encoding.UTF8);
                 RunCommand("ipconfig /flushdns");
@@ -820,6 +822,7 @@ namespace DnsSwitcherPro
                 }
                 catch { }
 
+                // В режиме IPv4 Only полностью очищаем файл hosts от блокировок Gemini
                 UpdateGeminiHostsRule(blockCompletely: false);
                 lastKnownHostsBlockState = false;
             }
@@ -839,6 +842,7 @@ namespace DnsSwitcherPro
                 }
                 catch { }
 
+                // При включенном IPv6 блокируем сайт и приложение Gemini
                 UpdateGeminiHostsRule(blockCompletely: true);
                 lastKnownHostsBlockState = true;
                 Dispatcher.Invoke(EnforceGeminiIpv6Guard);
@@ -862,6 +866,7 @@ namespace DnsSwitcherPro
             catch { return false; }
         }
 
+        // Надёжная регистрация автозапуска с поддержкой работы на ноутбуках от аккумулятора
         private void SetAutoStartTask(bool enable)
         {
             try
@@ -871,7 +876,15 @@ namespace DnsSwitcherPro
 
                 if (enable)
                 {
-                    RunCommand($"schtasks /Create /TN \"{AutoStartTaskName}\" /TR \"\\\"{exePath}\\\" --minimized\" /SC ONLOGON /RL HIGHEST /F");
+                    string safeExe = exePath.Replace("'", "''");
+                    string psScript =
+                        $"$act = New-ScheduledTaskAction -Execute '{safeExe}'; " +
+                        $"$trig = New-ScheduledTaskTrigger -AtLogOn; " +
+                        $"$prin = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-544' -RunLevel Highest; " +
+                        $"$set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero); " +
+                        $"Register-ScheduledTask -TaskName '{AutoStartTaskName}' -Action $act -Trigger $trig -Principal $prin -Settings $set -Force -ErrorAction SilentlyContinue";
+
+                    RunPowerShell(psScript);
                 }
                 else
                 {
@@ -1490,7 +1503,7 @@ namespace DnsSwitcherPro
                     WindowStyle = ProcessWindowStyle.Hidden
                 };
                 using var p = Process.Start(psi);
-                p?.WaitForExit(3500);
+                p?.WaitForExit(4500);
             }
             catch { }
         }
@@ -2032,7 +2045,7 @@ namespace DnsSwitcherPro
 
             root.Children.Add(CreateMenuCard("🚫 Блокировка IPv6 (Защита Gemini)",
                 config.BlockIpv6
-                    ? "Сейчас: IPv6 заблокирован (Gemini разрешён по IPv4)"
+                    ? "Сейчас: IPv6 заблокирован (hosts чист, Gemini работает по IPv4)"
                     : "Сейчас: IPv6 включён (Приложение и сайт Gemini ЗАБЛОКИРОВАНЫ)", () =>
             {
                 config.BlockIpv6 = !config.BlockIpv6;
@@ -2044,7 +2057,7 @@ namespace DnsSwitcherPro
             }, config.BlockIpv6 ? accentColorHex : "#FF5252"));
 
             root.Children.Add(CreateMenuCard("🚀 Автозапуск вместе с Windows",
-                autoStartActive ? "Сейчас: Включен (автостарт в трей при входе в ПК)" : "Сейчас: Отключен", () =>
+                autoStartActive ? "Сейчас: Включен (автостарт при входе в систему)" : "Сейчас: Отключен", () =>
             {
                 SetAutoStartTask(!autoStartActive);
                 dlg.Close();
