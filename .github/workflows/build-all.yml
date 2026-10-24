@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Поток 1: Сборка Android-версии (.apk)
   build-android:
     runs-on: ubuntu-latest
     steps:
@@ -32,6 +33,7 @@ jobs:
           name: DNS-Switcher-Pro-Android-APK
           path: app/build/outputs/apk/debug/app-debug.apk
 
+  # Поток 2: Сборка Windows-установщика со встроенным Zapret DPI
   build-windows:
     runs-on: windows-latest
     steps:
@@ -52,29 +54,34 @@ jobs:
           elseif (Test-Path "../icon.ico") { Copy-Item "../icon.ico" "icon.ico" -Force; }
           if (-not (Test-Path "icon.ico")) { Write-Error "icon.ico not found!"; exit 1; }
 
-          # Скачиваем официальный архив zapret-winws
-          Write-Host "Скачивание движка Zapret (winws)..."
-          $zapretUrl = "https://github.com/bol-van/zapret-winws/releases/latest/download/zapret-winws.zip"
-          $zipPath = "$PWD\zapret.zip"
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          Invoke-WebRequest -Uri $zapretUrl -OutFile $zipPath
-
-          # Создаем папку dpi и распаковываем нужные файлы
+          # Создаем папку dpi в publish
           $dpiDir = "$PWD\publish\dpi"
           if (-not (Test-Path $dpiDir)) { New-Item -ItemType Directory -Path $dpiDir | Out-Null }
-          
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, "$PWD\zapret_extracted")
 
-          # Копируем winws.exe и WinDivert извлеченные файлы в папку publish\dpi
-          $binFolder = Get-ChildItem -Path "$PWD\zapret_extracted" -Recurse -Directory | Where-Object { $_.Name -match "bin|x86_64" } | Select-Object -First 1
-          if ($binFolder) {
-              Copy-Item "$($binFolder.FullName)\*" $dpiDir -Recurse -Force
-          } else {
-              Copy-Item "$PWD\zapret_extracted\*" $dpiDir -Recurse -Force
+          # Скачиваем стабильный релиз движка zapret-winws
+          Write-Host "Скачивание движка Zapret..."
+          $zapretUrl = "https://github.com/bol-van/zapret-winws/releases/download/v1.6/zapret-winws-1.6.zip"
+          $zipPath = "$PWD\zapret.zip"
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          
+          try {
+              Invoke-WebRequest -Uri $zapretUrl -OutFile $zipPath
+              Add-Type -AssemblyName System.IO.Compression.FileSystem
+              [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, "$PWD\zapret_extracted")
+
+              $binFolder = Get-ChildItem -Path "$PWD\zapret_extracted" -Recurse -Directory | Where-Object { $_.Name -match "bin|x86_64" } | Select-Object -First 1
+              if ($binFolder) {
+                  Copy-Item "$($binFolder.FullName)\*" $dpiDir -Recurse -Force
+              } else {
+                  Copy-Item "$PWD\zapret_extracted\*" $dpiDir -Recurse -Force
+              }
+              Remove-Item $zipPath -Force
+              Remove-Item "$PWD\zapret_extracted" -Recurse -Force
+          } catch {
+              Write-Host "Ошибка загрузки архива, пробуем скачать winws.exe напрямую..."
+              $directUrl = "https://github.com/bol-van/zapret-winws/raw/master/bin/winws.exe"
+              Invoke-WebRequest -Uri $directUrl -OutFile "$dpiDir\winws.exe"
           }
-          Remove-Item $zipPath -Force
-          Remove-Item "$PWD\zapret_extracted" -Recurse -Force
 
       - name: Publish Standalone EXE
         working-directory: ./windows
