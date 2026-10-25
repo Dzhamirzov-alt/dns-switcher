@@ -33,7 +33,7 @@ jobs:
           name: DNS-Switcher-Pro-Android-APK
           path: app/build/outputs/apk/debug/app-debug.apk
 
-  # Поток 2: Сборка Windows-установщика со встроенным Zapret DPI
+  # Поток 2: Сборка Windows-установщика со встроенным Zapret Discord + YouTube
   build-windows:
     runs-on: windows-latest
     steps:
@@ -58,35 +58,41 @@ jobs:
         working-directory: ./windows
         run: dotnet publish DnsSwitcherPro.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o ./publish
 
-      - name: Download and Bundle Zapret (winws + WinDivert + Cygwin)
+      - name: Download and Bundle Zapret Discord YouTube (bin + lists)
         working-directory: ./windows
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $dpiDir = "$PWD\publish\dpi"
+          $dpiListsDir = "$PWD\publish\dpi\lists"
           if (-not (Test-Path $dpiDir)) { New-Item -ItemType Directory -Path $dpiDir -Force | Out-Null }
+          if (-not (Test-Path $dpiListsDir)) { New-Item -ItemType Directory -Path $dpiListsDir -Force | Out-Null }
 
-          Write-Host "Скачивание официального пакета bol-van/zapret-win-bundle..."
-          $bundleDir = "$PWD\zapret_bundle"
+          Write-Host "Клонирование актуальной сборки Flowseal/zapret-discord-youtube..."
+          $bundleDir = "$PWD\zapret_dy"
           if (Test-Path $bundleDir) { Remove-Item $bundleDir -Recurse -Force }
 
-          # Способ 1: Быстрое клонирование последнего среза официального репозитория zapret-win-bundle
-          git clone --depth 1 https://github.com/bol-van/zapret-win-bundle.git $bundleDir
+          git clone --depth 1 https://github.com/Flowseal/zapret-discord-youtube.git $bundleDir
 
-          $winwsSource = Join-Path $bundleDir "zapret-winws"
-          if (-not (Test-Path "$winwsSource\winws.exe")) {
-              Write-Error "Не найден winws.exe в скачанном пакете zapret-win-bundle!"
+          if (-not (Test-Path "$bundleDir\bin\winws.exe")) {
+              Write-Error "winws.exe не найден в Flowseal/zapret-discord-youtube!"
               exit 1
           }
 
-          # Копируем весь комплект (winws.exe, WinDivert64.sys, WinDivert.dll, cygwin1.dll, фейковые пакеты .bin)
-          Copy-Item "$winwsSource\*" $dpiDir -Recurse -Force
+          # Копируем все бинарники и фейк-пакеты (.bin, .dll, .sys, winws.exe) в publish\dpi
+          Copy-Item "$bundleDir\bin\*" $dpiDir -Recurse -Force
+
+          # Копируем все списки доменов (list-general.txt, list-google.txt, ipset-all.txt и др.) в publish\dpi\lists
+          if (Test-Path "$bundleDir\lists") {
+              Copy-Item "$bundleDir\lists\*" $dpiListsDir -Recurse -Force
+          }
+
           Remove-Item $bundleDir -Recurse -Force
 
           Write-Host "Файлы в папке publish\dpi:"
           Get-ChildItem $dpiDir | Select-Object Name, Length
 
-          # Гарантируем, что Inno Setup упакует папку publish\dpi внутрь установщика
+          # Гарантируем упаковку папки publish\dpi и вложенной папки lists в installer.iss
           $issPath = "$PWD\installer.iss"
           if (Test-Path $issPath) {
               $issContent = Get-Content $issPath -Raw
@@ -94,7 +100,7 @@ jobs:
                   Write-Host "Добавляем упаковку папки dpi в installer.iss..."
                   $dpiLine = "Source: ""publish\dpi\*""; DestDir: ""{app}\dpi""; Flags: ignoreversion recursesubdirs createallsubdirs"
                   $issContent = $issContent -replace "(\[Files\])", "`$1`r`n$dpiLine"
-                  Set-Content -Path $issPath -Value $issContent -Encoding UTF8
+                  Set-Content -Path $issPath -Value$issContent -Encoding UTF8
               }
           }
 
