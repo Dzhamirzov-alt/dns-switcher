@@ -45,7 +45,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Prepare Custom Icon and Zapret DPI
+      - name: Prepare Custom Icon
         working-directory: ./windows
         shell: pwsh
         run: |
@@ -54,38 +54,49 @@ jobs:
           elseif (Test-Path "../icon.ico") { Copy-Item "../icon.ico" "icon.ico" -Force; }
           if (-not (Test-Path "icon.ico")) { Write-Error "icon.ico not found!"; exit 1; }
 
-          # Создаем папку dpi в publish
-          $dpiDir = "$PWD\publish\dpi"
-          if (-not (Test-Path $dpiDir)) { New-Item -ItemType Directory -Path $dpiDir | Out-Null }
-
-          # Скачиваем стабильный релиз движка zapret-winws
-          Write-Host "Скачивание движка Zapret..."
-          $zapretUrl = "https://github.com/bol-van/zapret-winws/releases/download/v1.6/zapret-winws-1.6.zip"
-          $zipPath = "$PWD\zapret.zip"
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          
-          try {
-              Invoke-WebRequest -Uri $zapretUrl -OutFile $zipPath
-              Add-Type -AssemblyName System.IO.Compression.FileSystem
-              [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, "$PWD\zapret_extracted")
-
-              $binFolder = Get-ChildItem -Path "$PWD\zapret_extracted" -Recurse -Directory | Where-Object { $_.Name -match "bin|x86_64" } | Select-Object -First 1
-              if ($binFolder) {
-                  Copy-Item "$($binFolder.FullName)\*" $dpiDir -Recurse -Force
-              } else {
-                  Copy-Item "$PWD\zapret_extracted\*" $dpiDir -Recurse -Force
-              }
-              Remove-Item $zipPath -Force
-              Remove-Item "$PWD\zapret_extracted" -Recurse -Force
-          } catch {
-              Write-Host "Ошибка загрузки архива, пробуем скачать winws.exe напрямую..."
-              $directUrl = "https://github.com/bol-van/zapret-winws/raw/master/bin/winws.exe"
-              Invoke-WebRequest -Uri $directUrl -OutFile "$dpiDir\winws.exe"
-          }
-
       - name: Publish Standalone EXE
         working-directory: ./windows
         run: dotnet publish DnsSwitcherPro.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o ./publish
+
+      - name: Download and Bundle Zapret (winws + WinDivert + Cygwin)
+        working-directory: ./windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dpiDir = "$PWD\publish\dpi"
+          if (-not (Test-Path $dpiDir)) { New-Item -ItemType Directory -Path $dpiDir -Force | Out-Null }
+
+          Write-Host "Скачивание официального пакета bol-van/zapret-win-bundle..."
+          $bundleDir = "$PWD\zapret_bundle"
+          if (Test-Path $bundleDir) { Remove-Item $bundleDir -Recurse -Force }
+
+          # Способ 1: Быстрое клонирование последнего среза официального репозитория zapret-win-bundle
+          git clone --depth 1 https://github.com/bol-van/zapret-win-bundle.git $bundleDir
+
+          $winwsSource = Join-Path $bundleDir "zapret-winws"
+          if (-not (Test-Path "$winwsSource\winws.exe")) {
+              Write-Error "Не найден winws.exe в скачанном пакете zapret-win-bundle!"
+              exit 1
+          }
+
+          # Копируем весь комплект (winws.exe, WinDivert64.sys, WinDivert.dll, cygwin1.dll, фейковые пакеты .bin)
+          Copy-Item "$winwsSource\*" $dpiDir -Recurse -Force
+          Remove-Item $bundleDir -Recurse -Force
+
+          Write-Host "Файлы в папке publish\dpi:"
+          Get-ChildItem $dpiDir | Select-Object Name, Length
+
+          # Гарантируем, что Inno Setup упакует папку publish\dpi внутрь установщика
+          $issPath = "$PWD\installer.iss"
+          if (Test-Path $issPath) {
+              $issContent = Get-Content $issPath -Raw
+              if ($issContent -notmatch "publish\\dpi") {
+                  Write-Host "Добавляем упаковку папки dpi в installer.iss..."
+                  $dpiLine = "Source: ""publish\dpi\*""; DestDir: ""{app}\dpi""; Flags: ignoreversion recursesubdirs createallsubdirs"
+                  $issContent = $issContent -replace "(\[Files\])", "`$1`r`n$dpiLine"
+                  Set-Content -Path $issPath -Value $issContent -Encoding UTF8
+              }
+          }
 
       - name: Compile Windows Installer (Inno Setup)
         working-directory: ./windows
