@@ -50,7 +50,7 @@ namespace DnsSwitcherPro
         public bool BlockIpv6 { get; set; } = true;
         public bool AutoFixBrowserDns { get; set; } = false;
         public bool EnableDpiBypass { get; set; } = false;
-        public int DpiStrategyProfile { get; set; } = 1; // 1 = Disorder2 (Safe), 2 = Fake+Split2, 3 = Light Split
+        public int DpiStrategyProfile { get; set; } = 1; // 1 = ALT11, 2 = FAKE TLS AUTO, 3 = General Multisplit, 4 = Simple Fake
         public bool StartWithWindows { get; set; } = true;
         public bool FirstRunCompleted { get; set; } = false;
         public string CurrentMode { get; set; } = "off";
@@ -242,14 +242,15 @@ namespace DnsSwitcherPro
                     await Task.Run(() => SetAutoStartTask(true));
                 }
 
+                await Task.Run(() => EnforceIpv6Policy());
+
+                DetectInitialSystemMode();
+
                 if (config.EnableDpiBypass)
                 {
                     StartDpiBypass(silent: true);
                 }
 
-                await Task.Run(() => EnforceIpv6Policy());
-
-                DetectInitialSystemMode();
                 RefreshSystemState();
                 CheckNetworkAndTestAll();
 
@@ -279,53 +280,139 @@ namespace DnsSwitcherPro
             };
         }
 
-        // Формирование безопасной командной строки для winws.exe (без поломки обычных сайтов и Wi-Fi адаптеров)
+        // Гарантируем наличие списков доменов YouTube и Discord на случай их отсутствия
+        private void EnsureZapretListsExist(string dpiDir, out string listGooglePath, out string listGeneralPath)
+        {
+            string listsDir = Path.Combine(dpiDir, "lists");
+            Directory.CreateDirectory(listsDir);
+
+            listGooglePath = Path.Combine(listsDir, "list-google.txt");
+            listGeneralPath = Path.Combine(listsDir, "list-general.txt");
+
+            string[] googleDomains = new[]
+            {
+                "youtube.com",
+                "www.youtube.com",
+                "m.youtube.com",
+                "youtu.be",
+                "googlevideo.com",
+                "ytimg.com",
+                "i.ytimg.com",
+                "ggpht.com",
+                "yt3.ggpht.com",
+                "youtubei.googleapis.com",
+                "youtubeembeddedplayer.googleapis.com",
+                "ytimg.l.google.com",
+                "jnn-pa.googleapis.com",
+                "wide-youtube.l.google.com"
+            };
+
+            string[] discordAndGeneralDomains = new[]
+            {
+                "discord.com",
+                "www.discord.com",
+                "discordapp.com",
+                "discordapp.net",
+                "media.discordapp.net",
+                "cdn.discordapp.com",
+                "images-ext-1.discordapp.net",
+                "images-ext-2.discordapp.net",
+                "discord.gg",
+                "discord.media",
+                "discordstatus.com",
+                "dis.gd",
+                "discord-attachments-uploads-prd.storage.googleapis.com",
+                "rutracker.org",
+                "ntc.party"
+            };
+
+            if (!File.Exists(listGooglePath) || new FileInfo(listGooglePath).Length < 20)
+            {
+                File.WriteAllLines(listGooglePath, googleDomains, Encoding.UTF8);
+            }
+
+            if (!File.Exists(listGeneralPath) || new FileInfo(listGeneralPath).Length < 20)
+            {
+                File.WriteAllLines(listGeneralPath, discordAndGeneralDomains.Concat(googleDomains).Distinct(), Encoding.UTF8);
+            }
+        }
+
+        // Формирование аргументов winws.exe по архитектуре Flowseal/zapret-discord-youtube
         private string BuildZapretArguments(string dpiDir)
         {
+            EnsureZapretListsExist(dpiDir, out string listGoogle, out string listGeneral);
+
             string quicBin = Path.Combine(dpiDir, "quic_initial_www_google_com.bin");
-            string tlsBin = Path.Combine(dpiDir, "tls_clienthello_www_google_com.bin");
-            bool hasQuicBin = File.Exists(quicBin);
-            bool hasTlsBin = File.Exists(tlsBin);
+            string tlsGoogleBin = Path.Combine(dpiDir, "tls_clienthello_www_google_com.bin");
+            string tlsMaxBin = Path.Combine(dpiDir, "tls_clienthello_max_ru.bin");
+            if (!File.Exists(tlsMaxBin)) tlsMaxBin = tlsGoogleBin;
+
+            bool hasQuic = File.Exists(quicBin);
+            bool hasTls = File.Exists(tlsGoogleBin);
+
+            // Перехватываем только нужные порты HTTP/HTTPS и спецпорты Discord (шлюзы 2053..8443 и голос UDP 19294..50100)
+            string wfFilter = "--wf-l3=ipv4 --wf-tcp=80,443,2053,2083,2087,2096,8443 --wf-udp=443,19294-19344,50000-50100";
+
+            // 1. Обход QUIC (UDP 443) для YouTube и сайтов из списка
+            string udpQuicPart = hasQuic
+                ? $"--filter-udp=443 --hostlist=\"{listGeneral}\" --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic=\"{quicBin}\" --new "
+                : $"--filter-udp=443 --hostlist=\"{listGeneral}\" --dpi-desync=fake --dpi-desync-repeats=6 --new ";
+
+            // 2. Обход голосовых каналов и подключения Discord (UDP 19294-19344, 50000-50100 + протоколы discord,stun)
+            string udpDiscordVoicePart =
+                "--filter-udp=19294-19344,50000-50100 --filter-l7=discord,stun --dpi-desync=fake --dpi-desync-repeats=6 --new ";
+
+            // 3. Обход медиа-шлюзов Discord по нестандартным TCP-портам
+            string tcpDiscordMediaPart = hasTls
+                ? $"--filter-tcp=2053,2083,2087,2096,8443 --hostlist-domains=discord.media --dpi-desync=fake,multisplit --dpi-desync-split-seqovl=681 --dpi-desync-split-pos=1 --dpi-desync-fooling=ts --dpi-desync-repeats=8 --dpi-desync-split-seqovl-pattern=\"{tlsGoogleBin}\" --dpi-desync-fake-tls=\"{tlsGoogleBin}\" --new "
+                : "--filter-tcp=2053,2083,2087,2096,8443 --hostlist-domains=discord.media --dpi-desync=fake,multisplit --dpi-desync-split-pos=1 --dpi-desync-fooling=ts --dpi-desync-repeats=8 --new ";
 
             int profile = config.DpiStrategyProfile;
+            string tcpYoutubeAndGeneralPart;
 
             if (profile == 2)
             {
-                // Профиль 2: Fake + Split2 с badseq (для жёстких ТСПУ)
-                string udpPart = hasQuicBin
-                    ? $"--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic=\"{quicBin}\" --new "
-                    : "--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --new ";
-
-                string tcpPart = hasTlsBin
-                    ? $"--filter-tcp=80,443 --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-autottl=2 --dpi-desync-fooling=badseq --dpi-desync-fake-tls=\"{tlsBin}\""
-                    : "--filter-tcp=80,443 --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-autottl=2 --dpi-desync-fooling=badseq";
-
-                return $"--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443 {udpPart}{tcpPart}";
+                // Профиль #2: FAKE TLS AUTO (multidisorder + динамическая модуляция SNI www.google.com + badseq)
+                tcpYoutubeAndGeneralPart =
+                    $"--filter-tcp=443 --hostlist=\"{listGoogle}\" --ip-id=zero --dpi-desync=fake,multidisorder --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=11 --dpi-desync-fooling=badseq --dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com --new " +
+                    $"--filter-tcp=80,443 --hostlist=\"{listGeneral}\" --dpi-desync=fake,multidisorder --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=badseq --dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com";
             }
             else if (profile == 3)
             {
-                // Профиль 3: Мягкий (только фрагментация TCP без UDP и без фейк-пакетов)
-                return "--wf-l3=ipv4 --wf-tcp=80,443 --filter-tcp=80,443 --dpi-desync=split2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=1";
+                // Профиль #3: General (multisplit seqovl=681 + badseq + tls_clienthello_max_ru.bin)
+                tcpYoutubeAndGeneralPart = hasTls
+                    ? $"--filter-tcp=443 --hostlist=\"{listGoogle}\" --ip-id=zero --dpi-desync=fake,multisplit --dpi-desync-split-seqovl=681 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-repeats=8 --dpi-desync-split-seqovl-pattern=\"{tlsGoogleBin}\" --dpi-desync-fake-tls=\"{tlsMaxBin}\" --new " +
+                      $"--filter-tcp=80,443 --hostlist=\"{listGeneral}\" --dpi-desync=fake,multisplit --dpi-desync-split-seqovl=681 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-repeats=8 --dpi-desync-split-seqovl-pattern=\"{tlsGoogleBin}\" --dpi-desync-fake-tls=\"{tlsMaxBin}\""
+                    : $"--filter-tcp=80,443 --hostlist=\"{listGeneral}\" --dpi-desync=fake,multisplit --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-repeats=8";
+            }
+            else if (profile == 4)
+            {
+                // Профиль #4: Simple Fake (fake,split2 + ts)
+                tcpYoutubeAndGeneralPart = hasTls
+                    ? $"--filter-tcp=443 --hostlist=\"{listGoogle}\" --dpi-desync=fake,split2 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-fake-tls=\"{tlsGoogleBin}\" --new " +
+                      $"--filter-tcp=80,443 --hostlist=\"{listGeneral}\" --dpi-desync=fake,split2 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-fake-tls=\"{tlsGoogleBin}\""
+                    : $"--filter-tcp=80,443 --hostlist=\"{listGeneral}\" --dpi-desync=fake,split2 --dpi-desync-repeats=6 --dpi-desync-fooling=ts";
             }
             else
             {
-                // Профиль 1 (По умолчанию — самый стабильный):
-                // Десинхронизация disorder2 (split-pos=1) для TCP 80,443 без отправки битых TCP-флагов + Fake QUIC для YouTube/Discord
-                string udpPart = hasQuicBin
-                    ? $"--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=4 --dpi-desync-fake-quic=\"{quicBin}\" --new "
-                    : "--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=4 --new ";
-
-                return $"--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443 {udpPart}--filter-tcp=80,443 --dpi-desync=disorder2 --dpi-desync-split-pos=1";
+                // Профиль #1 (По умолчанию — ALT11): fake,multisplit + seqovl=681 + ts
+                tcpYoutubeAndGeneralPart = hasTls
+                    ? $"--filter-tcp=443 --hostlist=\"{listGoogle}\" --ip-id=zero --dpi-desync=fake,multisplit --dpi-desync-split-seqovl=681 --dpi-desync-split-pos=1 --dpi-desync-fooling=ts --dpi-desync-repeats=8 --dpi-desync-split-seqovl-pattern=\"{tlsGoogleBin}\" --dpi-desync-fake-tls=\"{tlsGoogleBin}\" --new " +
+                      $"--filter-tcp=80,443 --hostlist=\"{listGeneral}\" --dpi-desync=fake,multisplit --dpi-desync-split-seqovl=681 --dpi-desync-split-pos=1 --dpi-desync-fooling=ts --dpi-desync-repeats=8 --dpi-desync-split-seqovl-pattern=\"{tlsGoogleBin}\" --dpi-desync-fake-tls=\"{tlsGoogleBin}\""
+                    : $"--filter-tcp=80,443 --hostlist=\"{listGeneral}\" --dpi-desync=fake,multisplit --dpi-desync-split-pos=1,midsld --dpi-desync-fooling=ts --dpi-desync-repeats=8";
             }
+
+            return $"{wfFilter} {udpQuicPart}{udpDiscordVoicePart}{tcpDiscordMediaPart}{tcpYoutubeAndGeneralPart}";
         }
 
         private string GetDpiProfileShortName()
         {
             return config.DpiStrategyProfile switch
             {
-                2 => "Профиль #2 (Fake+Split)",
-                3 => "Профиль #3 (Мягкий TCP)",
-                _ => "Профиль #1 (Disorder2)"
+                2 => "Профиль #2 (FAKE TLS AUTO)",
+                3 => "Профиль #3 (General BadSeq)",
+                4 => "Профиль #4 (Simple Fake)",
+                _ => "Профиль #1 (ALT11 Multisplit)"
             };
         }
 
@@ -334,6 +421,15 @@ namespace DnsSwitcherPro
             try
             {
                 StopDpiBypass();
+
+                // Важно: Для работы Discord и YouTube в РФ не должен быть включен незашифрованный провайдерский DNS (режим "Выкл")
+                if (config.CurrentMode == "off")
+                {
+                    string targetDns = !string.IsNullOrEmpty(config.LastActiveHost)
+                        ? config.LastActiveHost
+                        : (serverList.Count > 0 ? serverList[0].host : "dns.comss.one");
+                    ApplyWindowsDnsServer(targetDns);
+                }
 
                 string baseDir = AppDomain.CurrentDomain.BaseDirectory;
                 string dpiDir = Path.Combine(baseDir, "dpi");
@@ -367,8 +463,7 @@ namespace DnsSwitcherPro
 
                 dpiProcess = Process.Start(psi);
 
-                // Проверяем, что процесс не завершился с ошибкой в первые 300 мс
-                Task.Delay(300).Wait();
+                Task.Delay(350).Wait();
                 if (dpiProcess == null || dpiProcess.HasExited)
                 {
                     config.EnableDpiBypass = false;
@@ -387,6 +482,7 @@ namespace DnsSwitcherPro
 
                 config.EnableDpiBypass = true;
                 SaveConfig();
+                RunCommand("ipconfig /flushdns");
                 UpdateDpiButtonVisualState();
                 UpdateTrayMenu();
                 return true;
@@ -429,7 +525,6 @@ namespace DnsSwitcherPro
                     }
                 }
 
-                // Обязательно останавливаем ядерный драйвер перехвата пакетов WinDivert, чтобы он не держал сокеты
                 RunCommand("sc stop WinDivert");
                 RunCommand("sc stop WinDivert14");
             }
@@ -464,7 +559,7 @@ namespace DnsSwitcherPro
             }
             else
             {
-                dpiBypassText.Text = "🛡️ Обход DPI: ОТКЛЮЧЕН (Нажмите для включения)";
+                dpiBypassText.Text = "🛡️ Обход DPI: ОТКЛЮЧЕН (ЛКМ — Вкл, ПКМ — Профиль)";
                 dpiBypassText.Foreground = BrushFromHex(textSubColorHex);
                 dpiBypassBtn.Background = BrushFromHex(bgCardHex);
                 dpiBypassBtn.BorderBrush = BrushFromHex(bgCardStrokeHex);
@@ -2118,873 +2213,4 @@ namespace DnsSwitcherPro
             var stack = new StackPanel();
             stack.Children.Add(new TextBlock
             {
-                Text = title,
-                FontSize = 14,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = BrushFromHex(customTitleColor ?? textMainColorHex)
-            });
-            stack.Children.Add(new TextBlock
-            {
-                Text = subtitle,
-                FontSize = 11.5,
-                Foreground = BrushFromHex(textSubColorHex),
-                Margin = new Thickness(0, 3, 0, 0),
-                TextWrapping = TextWrapping.Wrap
-            });
-
-            var border = new Border
-            {
-                Background = BrushFromHex(bgCardHex),
-                BorderBrush = BrushFromHex(customStroke ?? bgCardStrokeHex),
-                BorderThickness = new Thickness(1.5),
-                CornerRadius = new CornerRadius(12),
-                Padding = new Thickness(14, 11, 14, 11),
-                Margin = new Thickness(0, 0, 0, 10),
-                Cursor = Cursors.Hand,
-                Child = stack
-            };
-            border.MouseLeftButtonUp += (s, e) => onClick();
-            return border;
-        }
-
-        private Border CreateDialogButton(string text, string textColorHex, Action onClick, string? bgHex = null, string? strokeHex = null)
-        {
-            var btn = new Border
-            {
-                Background = BrushFromHex(bgHex ?? bgCardHex),
-                BorderBrush = BrushFromHex(strokeHex ?? bgCardStrokeHex),
-                BorderThickness = new Thickness(1.5),
-                CornerRadius = new CornerRadius(12),
-                Padding = new Thickness(14, 11, 14, 11),
-                Margin = new Thickness(0, 6, 0, 0),
-                Cursor = Cursors.Hand,
-                Child = new TextBlock
-                {
-                    Text = text,
-                    FontSize = 13.5,
-                    FontWeight = FontWeights.Bold,
-                    Foreground = BrushFromHex(textColorHex),
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    TextWrapping = TextWrapping.Wrap
-                }
-            };
-            btn.MouseLeftButtonUp += (s, e) => onClick();
-            return btn;
-        }
-
-        private void ShowSettingsDialog()
-        {
-            var dlg = CreateModalDialog("Настройки");
-            var root = new StackPanel();
-            root.Children.Add(CreateDialogHeader("⚙️ Настройки приложения"));
-
-            root.Children.Add(CreateMenuCard("➕ Добавить свой сервер", "Ручной ввод хоста и имени", () =>
-            {
-                dlg.Close();
-                ShowEditServerDialog(null, returnToSettings: true);
-            }));
-
-            root.Children.Add(CreateMenuCard("📚 Популярные DNS-серверы", "Каталог проверенных серверов", () =>
-            {
-                dlg.Close();
-                ShowPresetsDialog();
-            }));
-
-            root.Children.Add(CreateMenuCard("📊 Ping Benchmark (Топ серверов)", "Анализ скорости и автовыбор лидера", () =>
-            {
-                dlg.Close();
-                ShowBenchmarkDialog();
-            }));
-
-            root.Children.Add(CreateMenuCard("🌐 Сетевые настройки", "Обход DPI (Zapret), профиль DPI, браузеры, IPv6, DoH", () =>
-            {
-                dlg.Close();
-                ShowNetworkSettingsDialog();
-            }));
-
-            root.Children.Add(CreateMenuCard("🎨 Кастомизация и система", "Выбор темы, светлый/темный режим, автозапуск", () =>
-            {
-                dlg.Close();
-                ShowCustomizationDialog();
-            }));
-
-            root.Children.Add(CreateMenuCard("💾 Бэкап и сброс настроек", "Экспорт/импорт JSON, сброс списка", () =>
-            {
-                dlg.Close();
-                ShowBackupDialog();
-            }));
-
-            root.Children.Add(CreateDialogButton("Закрыть", accentColorHex, () => dlg.Close()));
-
-            dlg.Content = new Border
-            {
-                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
-                BorderBrush = BrushFromHex(bgCardStrokeHex),
-                BorderThickness = new Thickness(2),
-                CornerRadius = new CornerRadius(20),
-                Padding = new Thickness(22, 18, 22, 18),
-                Child = root
-            };
-            dlg.ShowDialog();
-        }
-
-        private void ShowBenchmarkDialog()
-        {
-            var dlg = CreateModalDialog("Ping Benchmark", () => ShowSettingsDialog());
-            var root = new StackPanel();
-            root.Children.Add(CreateDialogHeader("📊 Ping Benchmark — Топ серверов"));
-
-            var listBox = new StackPanel();
-            var sorted = serverList.OrderBy(s => s.ping > 0 ? s.ping : int.MaxValue).ToList();
-
-            for (int i = 0; i < sorted.Count; i++)
-            {
-                var srv = sorted[i];
-                string rank = i switch
-                {
-                    0 => "🥇 #1",
-                    1 => "🥈 #2",
-                    2 => "🥉 #3",
-                    _ => $"   #{i + 1}"
-                };
-
-                string pingText = srv.ping switch
-                {
-                    -1 => "Не проверен",
-                    -2 => "⏳ Тестирование...",
-                    -3 => "❌ Заблокирован (порт 853)",
-                    _ => $"⚡ {srv.ping} мс"
-                };
-
-                listBox.Children.Add(CreateMenuCard($"{rank}  {srv.name}", $"{pingText} ({srv.host})", () =>
-                {
-                    dlg.Close();
-                    ApplyWindowsDnsServer(srv.host);
-                }));
-            }
-
-            var scroll = new ScrollViewer
-            {
-                MaxHeight = 290,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                Content = listBox
-            };
-            root.Children.Add(scroll);
-
-            root.Children.Add(CreateDialogButton("⚡ Автовыбор (Подключить лучший #1)", accentColorHex, () =>
-            {
-                dlg.Close();
-                var best = serverList.Where(s => s.ping > 0).OrderBy(s => s.ping).FirstOrDefault();
-                if (best != null)
-                {
-                    ApplyWindowsDnsServer(best.host);
-                }
-                else
-                {
-                    CheckNetworkAndTestAll(true);
-                }
-            }, accentCardBgHex, accentColorHex));
-
-            root.Children.Add(CreateDialogButton("🔄 Запустить тест скорости", textMainColorHex, () =>
-            {
-                dlg.Close();
-                CheckNetworkAndTestAll(false);
-            }));
-
-            root.Children.Add(CreateDialogButton("Назад к настройкам", textSubColorHex, () =>
-            {
-                dlg.Close();
-                ShowSettingsDialog();
-            }));
-
-            dlg.Content = new Border
-            {
-                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
-                BorderBrush = BrushFromHex(bgCardStrokeHex),
-                BorderThickness = new Thickness(2),
-                CornerRadius = new CornerRadius(20),
-                Padding = new Thickness(22, 18, 22, 18),
-                Child = root
-            };
-            dlg.ShowDialog();
-        }
-
-        private void ShowNetworkSettingsDialog()
-        {
-            var dlg = CreateModalDialog("Сетевые настройки", () => ShowSettingsDialog());
-            var root = new StackPanel();
-            root.Children.Add(CreateDialogHeader("🌐 Сетевые настройки"));
-
-            var browserConflicts = CheckBrowserDnsConflicts();
-
-            string browserStatusSub = config.AutoFixBrowserDns
-                ? "Сейчас: Автоподчинение ВКЛ (браузеры берут системный DNS)"
-                : (browserConflicts.Count > 0
-                    ? $"⚠️ Обнаружен конфликт ({string.Join(", ", browserConflicts.Select(c => c.BrowserName))})! Нажмите для решения"
-                    : "Сейчас: Мониторинг активен (конфликтов не обнаружено)");
-
-            root.Children.Add(CreateMenuCard("🛡️ Обход DPI (Zapret) — Вкл / Выкл",
-                config.EnableDpiBypass
-                    ? $"Сейчас: ВКЛЮЧЕН • {GetDpiProfileShortName()}"
-                    : "Сейчас: Отключен", () =>
-            {
-                ToggleDpiBypass();
-                dlg.Close();
-                ShowNetworkSettingsDialog();
-            }, config.EnableDpiBypass ? accentColorHex : null));
-
-            root.Children.Add(CreateMenuCard("⚙️ Выбор профиля обхода DPI",
-                $"Текущий режим: {GetDpiProfileShortName()} (нажмите для смены метода)", () =>
-            {
-                dlg.Close();
-                ShowDpiProfileDialog(returnToNetworkSettings: true);
-            }));
-
-            root.Children.Add(CreateMenuCard("🌐 Контроль DNS в браузерах (Chrome / Edge / Brave / Яндекс)", browserStatusSub, () =>
-            {
-                dlg.Close();
-                ShowBrowserControlMenuDialog();
-            }, browserConflicts.Count > 0 ? "#FFAB00" : (config.AutoFixBrowserDns ? accentColorHex : null)));
-
-            root.Children.Add(CreateMenuCard("🚫 Блокировка IPv6 (Защита Gemini)",
-                config.BlockIpv6
-                    ? "Сейчас: IPv6 заблокирован (hosts чист, Gemini работает по IPv4)"
-                    : "Сейчас: IPv6 включён (Приложение и сайт Gemini ЗАБЛОКИРОВАНЫ)", () =>
-            {
-                config.BlockIpv6 = !config.BlockIpv6;
-                SaveConfig();
-                EnforceIpv6Policy();
-                RefreshSystemState();
-                dlg.Close();
-                ShowNetworkSettingsDialog();
-            }, config.BlockIpv6 ? accentColorHex : "#FF5252"));
-
-            root.Children.Add(CreateMenuCard("🔒 Нативное шифрование DoH (Windows 11)",
-                config.EnableDohEncryption ? "Сейчас: Включено (https://.../dns-query)" : "Сейчас: Отключено (только классический IPv4)", () =>
-            {
-                config.EnableDohEncryption = !config.EnableDohEncryption;
-                SaveConfig();
-                if (config.CurrentMode == "on" && !string.IsNullOrEmpty(config.LastActiveHost))
-                {
-                    ApplyWindowsDnsServer(config.LastActiveHost);
-                }
-                dlg.Close();
-                ShowNetworkSettingsDialog();
-            }));
-
-            root.Children.Add(CreateMenuCard("🔀 Автосортировка серверов по пингу",
-                config.AutoSortPing ? "Сейчас: Включена (быстрые серверы поднимаются наверх)" : "Сейчас: Отключена", () =>
-            {
-                config.AutoSortPing = !config.AutoSortPing;
-                SaveConfig();
-                if (config.AutoSortPing)
-                {
-                    serverList = serverList.OrderBy(s => s.ping > 0 ? s.ping : int.MaxValue).ToList();
-                    RenderServerList();
-                }
-                dlg.Close();
-                ShowNetworkSettingsDialog();
-            }));
-
-            root.Children.Add(CreateDialogButton("Назад к настройкам", accentColorHex, () =>
-            {
-                dlg.Close();
-                ShowSettingsDialog();
-            }));
-
-            dlg.Content = new Border
-            {
-                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
-                BorderBrush = BrushFromHex(bgCardStrokeHex),
-                BorderThickness = new Thickness(2),
-                CornerRadius = new CornerRadius(20),
-                Padding = new Thickness(22, 18, 22, 18),
-                Child = root
-            };
-            dlg.ShowDialog();
-        }
-
-        // Окно выбора стратегии обхода DPI
-        private void ShowDpiProfileDialog(bool returnToNetworkSettings)
-        {
-            var dlg = CreateModalDialog("Профиль обхода DPI", () =>
-            {
-                if (returnToNetworkSettings) ShowNetworkSettingsDialog();
-            });
-
-            var root = new StackPanel();
-            root.Children.Add(CreateDialogHeader("🛡️ Профиль обхода DPI (Zapret)"));
-
-            var profiles = new (int id, string title, string desc)[]
-            {
-                (1, "Профиль #1 — Disorder2 + QUIC (Рекомендуемый)",
-                    "Безопасная десинхронизация первого байта SNI без фейковых TCP-пакетов. Не блокирует обычные сайты и Wi-Fi роутеры, ускоряет YouTube и Discord."),
-                (2, "Профиль #2 — Fake + Split2 (Для жёстких ТСПУ)",
-                    "Отправка маскировочных пакетов с подменой badseq и autottl=2. Используйте, если на Профиле #1 не грузится видео на YouTube."),
-                (3, "Профиль #3 — Мягкий (Только фрагментация TCP)",
-                    "Лёгкое разделение TLS-пакетов на портах 80/443 без вмешательства в UDP. Максимальная совместимость с любыми сайтами.")
-            };
-
-            foreach (var p in profiles)
-            {
-                bool isSel = config.DpiStrategyProfile == p.id;
-                root.Children.Add(CreateMenuCard(p.title, p.desc, () =>
-                {
-                    config.DpiStrategyProfile = p.id;
-                    SaveConfig();
-                    if (config.EnableDpiBypass)
-                    {
-                        StartDpiBypass(silent: false);
-                    }
-                    else
-                    {
-                        UpdateDpiButtonVisualState();
-                    }
-                    dlg.Close();
-                    if (returnToNetworkSettings) ShowNetworkSettingsDialog();
-                }, isSel ? accentColorHex : null, isSel ? accentColorHex : null));
-            }
-
-            root.Children.Add(CreateDialogButton("Назад", textSubColorHex, () =>
-            {
-                dlg.Close();
-                if (returnToNetworkSettings) ShowNetworkSettingsDialog();
-            }));
-
-            dlg.Content = new Border
-            {
-                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
-                BorderBrush = BrushFromHex(bgCardStrokeHex),
-                BorderThickness = new Thickness(2),
-                CornerRadius = new CornerRadius(20),
-                Padding = new Thickness(22, 18, 22, 18),
-                Child = root
-            };
-            dlg.ShowDialog();
-        }
-
-        private void ShowCustomizationDialog()
-        {
-            var dlg = CreateModalDialog("Кастомизация и система", () => ShowSettingsDialog());
-            var root = new StackPanel();
-            root.Children.Add(CreateDialogHeader("🎨 Кастомизация и система"));
-
-            bool autoStartActive = IsAutoStartEnabled();
-
-            root.Children.Add(CreateMenuCard("🎨 Выбор темы и неонового акцента", "Зеленый, Синий, Фиолетовый, Янтарный", () =>
-            {
-                dlg.Close();
-                ShowThemeChooserDialog();
-            }));
-
-            root.Children.Add(CreateMenuCard("☀️ Режим оформления интерфейса",
-                config.LightMode ? "Сейчас: Светлая тема" : "Сейчас: Темная тема", () =>
-            {
-                config.LightMode = !config.LightMode;
-                SaveConfig();
-                UpdateUIColors();
-                dlg.Close();
-                ShowCustomizationDialog();
-            }));
-
-            root.Children.Add(CreateMenuCard("🚀 Автозапуск вместе с Windows",
-                autoStartActive ? "Сейчас: Включен (автостарт при входе в систему)" : "Сейчас: Отключен", () =>
-            {
-                SetAutoStartTask(!autoStartActive);
-                dlg.Close();
-                ShowCustomizationDialog();
-            }));
-
-            root.Children.Add(CreateDialogButton("Назад к настройкам", accentColorHex, () =>
-            {
-                dlg.Close();
-                ShowSettingsDialog();
-            }));
-
-            dlg.Content = new Border
-            {
-                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
-                BorderBrush = BrushFromHex(bgCardStrokeHex),
-                BorderThickness = new Thickness(2),
-                CornerRadius = new CornerRadius(20),
-                Padding = new Thickness(22, 18, 22, 18),
-                Child = root
-            };
-            dlg.ShowDialog();
-        }
-
-        private void ShowBrowserControlMenuDialog()
-        {
-            var dlg = CreateModalDialog("Контроль DNS в браузерах", () => ShowNetworkSettingsDialog());
-            var root = new StackPanel();
-            root.Children.Add(CreateDialogHeader("🌐 Контроль DNS в браузерах"));
-
-            var conflicts = CheckBrowserDnsConflicts();
-            string statusMsg = conflicts.Count > 0
-                ? $"⚠️ Обнаружен сторонний DNS в: {string.Join(", ", conflicts.Select(c => c.BrowserName))}."
-                : "✅ Все обнаруженные браузеры подчиняются системному DNS Windows.";
-
-            root.Children.Add(CreateMenuCard("🔍 Статус проверки браузеров", statusMsg, () => { },
-                conflicts.Count > 0 ? "#FFAB00" : accentColorHex));
-
-            root.Children.Add(CreateMenuCard("⚡ Автоматически подчинить браузеры системе",
-                "Перевести Chrome, Edge, Brave и Яндекс в режим «С вашим текущим поставщиком услуг»", () =>
-            {
-                dlg.Close();
-                ApplyBrowserDnsAutoFix(silent: false);
-                ShowNetworkSettingsDialog();
-            }, accentColorHex));
-
-            root.Children.Add(CreateMenuCard("📖 Открыть инструкцию (Как настроить вручную)",
-                "Пошаговое описание и быстрые ссылки для адресной строки", () =>
-            {
-                dlg.Close();
-                ShowBrowserManualGuideDialog(returnToNetworkSettings: true);
-            }));
-
-            if (config.AutoFixBrowserDns)
-            {
-                root.Children.Add(CreateMenuCard("🔓 Отключить принудительную политику браузеров",
-                    "Разрешить ручное изменение DNS внутри настроек браузера", () =>
-                {
-                    RemoveBrowserDnsPolicies();
-                    dlg.Close();
-                    ShowNetworkSettingsDialog();
-                }));
-            }
-
-            root.Children.Add(CreateDialogButton("Назад к сетевым настройкам", textSubColorHex, () =>
-            {
-                dlg.Close();
-                ShowNetworkSettingsDialog();
-            }));
-
-            dlg.Content = new Border
-            {
-                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
-                BorderBrush = BrushFromHex(bgCardStrokeHex),
-                BorderThickness = new Thickness(2),
-                CornerRadius = new CornerRadius(20),
-                Padding = new Thickness(22, 18, 22, 18),
-                Child = root
-            };
-            dlg.ShowDialog();
-        }
-
-        private void ShowThemeChooserDialog()
-        {
-            var dlg = CreateModalDialog("Выбор темы", () => ShowCustomizationDialog());
-            var root = new StackPanel();
-            root.Children.Add(CreateDialogHeader("🎨 Выбор темы оформления"));
-
-            var themes = new (string key, string title, string color)[]
-            {
-                ("green", "🟢 Neon Green (Классический неон)", "#00E676"),
-                ("blue", "🔵 Cyber Blue (Неоновый голубой)", "#00B0FF"),
-                ("purple", "🟣 Synthwave Purple (Фиолетовый кибер)", "#E040FB"),
-                ("amber", "🟠 Amber Glow (Янтарный премиум)", "#FFAB00")
-            };
-
-            foreach (var t in themes)
-            {
-                bool isSel = config.Theme == t.key;
-                root.Children.Add(CreateMenuCard(t.title, isSel ? "Активная тема" : "Нажмите для применения", () =>
-                {
-                    config.Theme = t.key;
-                    SaveConfig();
-                    UpdateUIColors();
-                    dlg.Close();
-                    ShowCustomizationDialog();
-                }, isSel ? t.color : null, isSel ? t.color : null));
-            }
-
-            root.Children.Add(CreateDialogButton("Назад к кастомизации", accentColorHex, () =>
-            {
-                dlg.Close();
-                ShowCustomizationDialog();
-            }));
-
-            dlg.Content = new Border
-            {
-                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
-                BorderBrush = BrushFromHex(bgCardStrokeHex),
-                BorderThickness = new Thickness(2),
-                CornerRadius = new CornerRadius(20),
-                Padding = new Thickness(22, 18, 22, 18),
-                Child = root
-            };
-            dlg.ShowDialog();
-        }
-
-        private void ShowServerActionsDialog(int index)
-        {
-            if (index < 0 || index >= serverList.Count) return;
-            var server = serverList[index];
-            var dlg = CreateModalDialog(server.name);
-            var root = new StackPanel();
-
-            root.Children.Add(CreateDialogHeader(server.name));
-
-            root.Children.Add(CreateMenuCard("✏️ Редактировать", "Изменить название или адрес хоста", () =>
-            {
-                dlg.Close();
-                ShowEditServerDialog(index, returnToSettings: false);
-            }));
-
-            root.Children.Add(CreateMenuCard("🗑️ Удалить", "Удалить сервер из вашего списка", () =>
-            {
-                dlg.Close();
-                lastDeletedServer = serverList[index];
-                lastDeletedIndex = index;
-                serverList.RemoveAt(index);
-                SaveConfig();
-                RenderServerList();
-
-                undoText.Text = $"Удален «{lastDeletedServer.name}»";
-                undoBanner.Visibility = Visibility.Visible;
-                RecalculateWindowHeight();
-                undoTimer.Stop();
-                undoTimer.Start();
-            }, "#FF5252", "#FF5252"));
-
-            root.Children.Add(CreateDialogButton("Отмена", accentColorHex, () => dlg.Close()));
-
-            dlg.Content = new Border
-            {
-                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
-                BorderBrush = BrushFromHex(bgCardStrokeHex),
-                BorderThickness = new Thickness(2),
-                CornerRadius = new CornerRadius(20),
-                Padding = new Thickness(22, 18, 22, 18),
-                Child = root
-            };
-            dlg.ShowDialog();
-        }
-
-        private void ShowEditServerDialog(int? editIndex, bool returnToSettings)
-        {
-            bool isEdit = editIndex.HasValue && editIndex.Value >= 0;
-            var current = isEdit ? serverList[editIndex!.Value] : null;
-
-            var dlg = CreateModalDialog("Сервер", () =>
-            {
-                if (returnToSettings) ShowSettingsDialog();
-            });
-
-            var root = new StackPanel();
-            root.Children.Add(CreateDialogHeader(isEdit ? "✏️ Редактировать сервер" : "➕ Добавить свой сервер"));
-
-            var nameBox = new TextBox
-            {
-                Text = current?.name ?? "",
-                FontSize = 14,
-                Foreground = BrushFromHex(textMainColorHex),
-                Background = BrushFromHex(bgCardHex),
-                BorderBrush = BrushFromHex(bgCardStrokeHex),
-                Padding = new Thickness(10, 8, 10, 8),
-                Margin = new Thickness(0, 0, 0, 10)
-            };
-
-            var hostBox = new TextBox
-            {
-                Text = current?.host ?? "",
-                FontSize = 14,
-                Foreground = BrushFromHex(textMainColorHex),
-                Background = BrushFromHex(bgCardHex),
-                BorderBrush = BrushFromHex(bgCardStrokeHex),
-                Padding = new Thickness(10, 8, 10, 8),
-                Margin = new Thickness(0, 0, 0, 14)
-            };
-
-            root.Children.Add(new TextBlock { Text = "Название:", Foreground = BrushFromHex(textSubColorHex), Margin = new Thickness(0, 0, 0, 4) });
-            root.Children.Add(nameBox);
-            root.Children.Add(new TextBlock { Text = "Хост (например, dns.comss.one):", Foreground = BrushFromHex(textSubColorHex), Margin = new Thickness(0, 0, 0, 4) });
-            root.Children.Add(hostBox);
-
-            root.Children.Add(CreateDialogButton("Сохранить", accentColorHex, () =>
-            {
-                string cleanHost = hostBox.Text.Trim().ToLowerInvariant()
-                    .Replace("https://", "").Replace("http://", "").Replace("tls://", "");
-                if (cleanHost.Contains('/')) cleanHost = cleanHost.Split('/')[0];
-                if (cleanHost.Contains(':')) cleanHost = cleanHost.Split(':')[0];
-
-                if (string.IsNullOrEmpty(cleanHost)) return;
-                string cleanName = string.IsNullOrWhiteSpace(nameBox.Text) ? cleanHost : nameBox.Text.Trim();
-
-                if (isEdit)
-                {
-                    serverList[editIndex!.Value].name = cleanName;
-                    serverList[editIndex!.Value].host = cleanHost;
-                }
-                else
-                {
-                    serverList.Add(new DnsServer { name = cleanName, host = cleanHost });
-                }
-                SaveConfig();
-                dlg.Close();
-                CheckNetworkAndTestAll();
-            }, accentCardBgHex, accentColorHex));
-
-            root.Children.Add(CreateDialogButton("Назад", textSubColorHex, () =>
-            {
-                dlg.Close();
-                if (returnToSettings) ShowSettingsDialog();
-            }));
-
-            dlg.Content = new Border
-            {
-                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
-                BorderBrush = BrushFromHex(bgCardStrokeHex),
-                BorderThickness = new Thickness(2),
-                CornerRadius = new CornerRadius(20),
-                Padding = new Thickness(22, 18, 22, 18),
-                Child = root
-            };
-            dlg.ShowDialog();
-        }
-
-        private void ShowPresetsDialog()
-        {
-            var dlg = CreateModalDialog("Популярные серверы", () => ShowSettingsDialog());
-            var root = new StackPanel();
-            root.Children.Add(CreateDialogHeader("📚 Популярные DNS-серверы"));
-
-            var listStack = new StackPanel();
-            foreach (var item in popularCatalog)
-            {
-                listStack.Children.Add(CreateMenuCard(item.name, item.host, () =>
-                {
-                    if (!serverList.Any(s => string.Equals(s.host, item.host, StringComparison.OrdinalIgnoreCase)))
-                    {
-                        serverList.Add(new DnsServer { name = item.name, host = item.host });
-                        SaveConfig();
-                        CheckNetworkAndTestAll();
-                    }
-                    dlg.Close();
-                }));
-            }
-
-            var scroll = new ScrollViewer
-            {
-                MaxHeight = 310,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                Content = listStack
-            };
-            root.Children.Add(scroll);
-
-            root.Children.Add(CreateDialogButton("➕ Добавить все недостающие", accentColorHex, () =>
-            {
-                foreach (var p in popularCatalog)
-                {
-                    if (!serverList.Any(s => string.Equals(s.host, p.host, StringComparison.OrdinalIgnoreCase)))
-                    {
-                        serverList.Add(new DnsServer { name = p.name, host = p.host });
-                    }
-                }
-                SaveConfig();
-                dlg.Close();
-                CheckNetworkAndTestAll();
-            }));
-
-            root.Children.Add(CreateDialogButton("Назад к настройкам", textSubColorHex, () =>
-            {
-                dlg.Close();
-                ShowSettingsDialog();
-            }));
-
-            dlg.Content = new Border
-            {
-                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
-                BorderBrush = BrushFromHex(bgCardStrokeHex),
-                BorderThickness = new Thickness(2),
-                CornerRadius = new CornerRadius(20),
-                Padding = new Thickness(22, 18, 22, 18),
-                Child = root
-            };
-            dlg.ShowDialog();
-        }
-
-        private void ShowBackupDialog()
-        {
-            var dlg = CreateModalDialog("Бэкап", () => ShowSettingsDialog());
-            var root = new StackPanel();
-            root.Children.Add(CreateDialogHeader("💾 Бэкап и восстановление"));
-
-            root.Children.Add(CreateMenuCard("💾 Сохранить бэкап в файл (.json)", "Полная совместимость с Android-версией", () =>
-            {
-                var sfd = new SaveFileDialog
-                {
-                    FileName = "dns_switcher_backup.json",
-                    Filter = "JSON Files (*.json)|*.json"
-                };
-                if (sfd.ShowDialog() == true)
-                {
-                    string json = JsonSerializer.Serialize(serverList, new JsonSerializerOptions { WriteIndented = true });
-                    File.WriteAllText(sfd.FileName, json, Encoding.UTF8);
-                }
-                dlg.Close();
-            }));
-
-            root.Children.Add(CreateMenuCard("📂 Загрузить бэкап из файла (.json)", "Импорт серверов с телефона или ПК", () =>
-            {
-                var ofd = new OpenFileDialog
-                {
-                    Filter = "JSON Files (*.json)|*.json|All files (*.*)|*.*"
-                };
-                if (ofd.ShowDialog() == true)
-                {
-                    try
-                    {
-                        string raw = File.ReadAllText(ofd.FileName, Encoding.UTF8);
-                        var imported = JsonSerializer.Deserialize<List<DnsServer>>(raw);
-                        if (imported != null)
-                        {
-                            foreach (var s in imported)
-                            {
-                                if (!string.IsNullOrEmpty(s.host) && !serverList.Any(x => x.host.Equals(s.host, StringComparison.OrdinalIgnoreCase)))
-                                {
-                                    serverList.Add(s);
-                                }
-                            }
-                            SaveConfig();
-                            CheckNetworkAndTestAll();
-                        }
-                    }
-                    catch { }
-                }
-                dlg.Close();
-            }));
-
-            root.Children.Add(CreateMenuCard("🔄 Сбросить к стандартным 7 серверам", "Восстановить базовый список", () =>
-            {
-                serverList = defaultServers.Select(d => new DnsServer { name = d.name, host = d.host }).ToList();
-                SaveConfig();
-                dlg.Close();
-                CheckNetworkAndTestAll();
-            }));
-
-            root.Children.Add(CreateDialogButton("Назад к настройкам", accentColorHex, () =>
-            {
-                dlg.Close();
-                ShowSettingsDialog();
-            }));
-
-            dlg.Content = new Border
-            {
-                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
-                BorderBrush = BrushFromHex(bgCardStrokeHex),
-                BorderThickness = new Thickness(2),
-                CornerRadius = new CornerRadius(20),
-                Padding = new Thickness(22, 18, 22, 18),
-                Child = root
-            };
-            dlg.ShowDialog();
-        }
-
-        private void SetupTrayIcon()
-        {
-            trayIcon = new Forms.NotifyIcon
-            {
-                Icon = LoadAppCustomIcon(),
-                Visible = true,
-                Text = "DNS Switcher Pro (IPv4 Only)"
-            };
-
-            trayIcon.DoubleClick += (s, e) =>
-            {
-                Show();
-                if (WindowState == WindowState.Minimized)
-                {
-                    WindowState = WindowState.Normal;
-                }
-                RecalculateWindowHeight();
-                Activate();
-            };
-
-            UpdateTrayMenu();
-        }
-
-        private void UpdateTrayMenu()
-        {
-            var menu = new Forms.ContextMenuStrip();
-            menu.Items.Add("⚡ Открыть DNS Switcher Pro", null, (s, e) =>
-            {
-                Show();
-                if (WindowState == WindowState.Minimized)
-                {
-                    WindowState = WindowState.Normal;
-                }
-                RecalculateWindowHeight();
-                Activate();
-            });
-            menu.Items.Add(new Forms.ToolStripSeparator());
-
-            string dpiLabel = config.EnableDpiBypass
-                ? $"✔ 🛡️ Обход DPI: ВКЛ ({GetDpiProfileShortName()})"
-                : "    🛡️ Обход DPI: ВЫКЛ";
-            menu.Items.Add(dpiLabel, null, (s, e) => ToggleDpiBypass());
-
-            menu.Items.Add(new Forms.ToolStripSeparator());
-
-            foreach (var srv in serverList)
-            {
-                bool isCurrent = config.CurrentMode == "on" &&
-                                 string.Equals(config.LastActiveHost, srv.host, StringComparison.OrdinalIgnoreCase);
-                string prefix = isCurrent ? "✔ " : "    ";
-                menu.Items.Add($"{prefix}{srv.name}", null, (s, e) => ApplyWindowsDnsServer(srv.host));
-            }
-
-            menu.Items.Add(new Forms.ToolStripSeparator());
-            menu.Items.Add("Режим: Авто (DHCP + DoH)", null, (s, e) => ResetWindowsDnsToDhcp(true));
-            menu.Items.Add("Режим: Выкл (Стандартный DHCP)", null, (s, e) => ResetWindowsDnsToDhcp(false));
-            menu.Items.Add(new Forms.ToolStripSeparator());
-            menu.Items.Add("Выход", null, (s, e) =>
-            {
-                StopDpiBypass();
-                trayIcon.Visible = false;
-                Environment.Exit(0);
-            });
-
-            trayIcon.ContextMenuStrip = menu;
-        }
-
-        private void LoadConfig()
-        {
-            if (File.Exists(configPath))
-            {
-                try
-                {
-                    string json = File.ReadAllText(configPath, Encoding.UTF8);
-                    var loaded = JsonSerializer.Deserialize<AppConfig>(json);
-                    if (loaded != null)
-                    {
-                        config = loaded;
-                        if (config.DpiStrategyProfile < 1 || config.DpiStrategyProfile > 3)
-                        {
-                            config.DpiStrategyProfile = 1;
-                        }
-                        serverList = config.Servers ?? new List<DnsServer>();
-                    }
-                }
-                catch { }
-            }
-
-            if (serverList.Count == 0)
-            {
-                serverList = defaultServers.Select(d => new DnsServer { name = d.name, host = d.host }).ToList();
-                SaveConfig();
-            }
-        }
-
-        private void SaveConfig()
-        {
-            try
-            {
-                config.Servers = serverList;
-                string json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
-                File.WriteAllText(configPath, json, Encoding.UTF8);
-            }
-            catch { }
-        }
-    }
-}
+                Text = title
