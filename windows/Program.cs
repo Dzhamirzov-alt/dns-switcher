@@ -79,6 +79,7 @@ namespace DnsSwitcherPro
         private const string AutoStartTaskName = "DnsSwitcherProAutoStart";
         private const string HostsBlockStartMarker = "# >>> DNS_SWITCHER_PRO_GEMINI_GUARD_START >>>";
         private const string HostsBlockEndMarker = "# <<< DNS_SWITCHER_PRO_GEMINI_GUARD_END <<<";
+        private static readonly UTF8Encoding Utf8NoBom = new UTF8Encoding(false);
 
         private Process? dpiProcess = null;
 
@@ -284,17 +285,11 @@ namespace DnsSwitcherPro
             return null;
         }
 
-        // Гарантируем наличие полного списка доменов YouTube (в новых сборках Flowseal они вынесены в list-google.txt)
-        private string EnsureGoogleHostlistFile(string dpiDir)
+        // Собираем единый чистый файл list-combined.txt БЕЗ BOM (UTF-8 without BOM),
+        // объединяющий list-general.txt, list-google.txt и обязательные домены YouTube + Discord
+        private string BuildCombinedHostlistFile(string dpiDir)
         {
-            string? existingGoogle = FindDpiAsset(dpiDir, "list-google.txt");
-            if (existingGoogle != null) return existingGoogle;
-
-            string listsSubDir = Path.Combine(dpiDir, "lists");
-            Directory.CreateDirectory(listsSubDir);
-            string fallbackGooglePath = Path.Combine(listsSubDir, "list-google.txt");
-
-            string[] googleDomains = new[]
+            var domains = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
                 "youtube.com",
                 "www.youtube.com",
@@ -307,76 +302,123 @@ namespace DnsSwitcherPro
                 "s.ytimg.com",
                 "ggpht.com",
                 "yt3.ggpht.com",
+                "googleusercontent.com",
                 "lh3.googleusercontent.com",
                 "youtubei.googleapis.com",
                 "youtubeembeddedplayer.googleapis.com",
                 "ytimg.l.google.com",
                 "jnn-pa.googleapis.com",
                 "wide-youtube.l.google.com",
-                "play.google.com"
+                "play.google.com",
+                "gstatic.com",
+                "discord.com",
+                "discordapp.com",
+                "discordapp.net",
+                "discord.gg",
+                "discord.media",
+                "discordcdn.com",
+                "discordstatus.com"
             };
 
+            string[] sourceFiles = new[] { "list-general.txt", "list-google.txt", "russia-youtube.txt", "russia-discord.txt" };
+            foreach (var srcName in sourceFiles)
+            {
+                string? path = FindDpiAsset(dpiDir, srcName);
+                if (path != null && File.Exists(path))
+                {
+                    try
+                    {
+                        foreach (var rawLine in File.ReadAllLines(path, Encoding.UTF8))
+                        {
+                            string line = rawLine.Trim().TrimStart('\uFEFF');
+                            if (!string.IsNullOrEmpty(line) && !line.StartsWith("#"))
+                            {
+                                domains.Add(line);
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+
+            string combinedPath = Path.Combine(dpiDir, "list-combined.txt");
             try
             {
-                File.WriteAllLines(fallbackGooglePath, googleDomains, Encoding.UTF8);
+                File.WriteAllLines(combinedPath, domains, Utf8NoBom);
             }
             catch { }
 
-            return fallbackGooglePath;
+            return combinedPath;
         }
 
-        // Построение аргументов winws.exe по стандарту актуальных сборок Flowseal/zapret-discord-youtube
-        // с обязательным подключением list-google.txt (для YouTube) и list-general.txt (для Discord и сайтов)
+        // Отключение зависающего UDP/QUIC в браузерах на время работы обхода DPI,
+        // чтобы Яндекс.Браузер и Chrome сразу открывали YouTube по стабильному TCP 443
+        private void SetBrowserQuicPolicy(bool disableQuic)
+        {
+            foreach (var b in GetInstalledBrowsersTargetList())
+            {
+                if (!File.Exists(b.LocalStatePath)) continue;
+                try
+                {
+                    using var polKey = Registry.LocalMachine.CreateSubKey(b.PolicyPath, true);
+                    if (disableQuic)
+                    {
+                        polKey?.SetValue("QuicAllowed", 0, RegistryValueKind.DWord);
+                    }
+                    else
+                    {
+                        polKey?.DeleteValue("QuicAllowed", false);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        // Проверенная рабочая формула запуска winws.exe (с --wf-l3=ipv4), на которой работает Discord + добавлен YouTube
         private string BuildZapretArguments(string dpiDir)
         {
             string? quicBin = FindDpiAsset(dpiDir, "quic_initial_www_google_com.bin");
             string? tlsBin = FindDpiAsset(dpiDir, "tls_clienthello_www_google_com.bin");
-            string? listGeneral = FindDpiAsset(dpiDir, "list-general.txt");
-            string listGoogle = EnsureGoogleHostlistFile(dpiDir);
-
-            var hostListsBuilder = new StringBuilder();
-            if (listGeneral != null) hostListsBuilder.Append($" --hostlist=\"{listGeneral}\"");
-            if (File.Exists(listGoogle)) hostListsBuilder.Append($" --hostlist=\"{listGoogle}\"");
-            string allHostLists = hostListsBuilder.ToString();
-            string googleHostListArg = File.Exists(listGoogle) ? $" --hostlist=\"{listGoogle}\"" : allHostLists;
-
-            string wfPorts = "--wf-tcp=80,443,2053,2083,2087,2096,8443 --wf-udp=443,19294-19344,50000-50100";
-
-            // Блок 1: Голосовые порты Discord (UDP 19294-19344, 50000-50100)
-            string discordVoiceUdp = "--filter-udp=19294-19344,50000-50100 --filter-l7=discord,stun --dpi-desync=fake --dpi-desync-repeats=6 --new ";
-
-            // Блок 2: UDP 443 (QUIC для YouTube и Discord)
-            string quicUdp = quicBin != null
-                ? $"--filter-udp=443{allHostLists} --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic=\"{quicBin}\" --new "
-                : $"--filter-udp=443{allHostLists} --dpi-desync=fake --dpi-desync-repeats=6 --new ";
+            string combinedList = BuildCombinedHostlistFile(dpiDir);
+            string hostListArg = File.Exists(combinedList) ? $" --hostlist=\"{combinedList}\"" : "";
 
             int profile = config.DpiStrategyProfile;
 
             if (profile == 2)
             {
-                // Профиль #2: ALT (Fake + Multidisorder с fooling=ts — не сбрасывает соединения Google в отличие от badseq)
-                string tcpRule = tlsBin != null
-                    ? $"--filter-tcp=80,443{allHostLists} --ip-id=zero --dpi-desync=fake,multidisorder --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-fake-tls=\"{tlsBin}\""
-                    : $"--filter-tcp=80,443{allHostLists} --ip-id=zero --dpi-desync=fake,multidisorder --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts";
+                // Профиль #2: Мягкая сегментация Split2 + SeqOvl=1 (без badseq, чтобы Google не сбрасывал соединение)
+                string udpPart = quicBin != null
+                    ? $"--filter-udp=443{hostListArg} --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic=\"{quicBin}\" --new "
+                    : $"--filter-udp=443{hostListArg} --dpi-desync=fake --dpi-desync-repeats=6 --new ";
 
-                return $"{wfPorts} {discordVoiceUdp}{quicUdp}{tcpRule}";
+                return $"--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443,50000-50099 " +
+                       $"--filter-udp=50000-50099 --dpi-desync=fake --dpi-desync-any-protocol=1 --dpi-desync-repeats=6 --new " +
+                       $"{udpPart}" +
+                       $"--filter-tcp=80,443{hostListArg} --dpi-desync=split2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=1";
             }
             else if (profile == 3)
             {
-                // Профиль #3: Универсальный Multidisorder без фейк-пакетов (работает на любых роутерах и всех доменах)
-                return $"{wfPorts} {discordVoiceUdp}{quicUdp}--filter-tcp=80,443 --ip-id=zero --dpi-desync=multidisorder --dpi-desync-split-pos=1,midsld";
+                // Профиль #3: Глобальный Disorder2 для ВСЕХ сайтов и любых кэш-серверов YouTube (без ограничений по списку)
+                string udpPart = quicBin != null
+                    ? $"--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=4 --dpi-desync-fake-quic=\"{quicBin}\" --new "
+                    : "--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=4 --new ";
+
+                return $"--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443,50000-50099 " +
+                       $"--filter-udp=50000-50099 --dpi-desync=fake --dpi-desync-any-protocol=1 --dpi-desync-repeats=6 --new " +
+                       $"{udpPart}" +
+                       "--filter-tcp=80,443 --dpi-desync=disorder2 --dpi-desync-split-pos=1";
             }
             else
             {
-                // Профиль #1 (По умолчанию — точная стратегия general.bat из Flowseal):
-                // Отдельное правило с multisplit + seqovl=681 специально для list-google.txt (YouTube) + правило для Discord/сайтов
-                string seqOvlPattern = tlsBin != null ? $" --dpi-desync-split-seqovl-pattern=\"{tlsBin}\"" : "";
+                // Профиль #1 (По умолчанию — проверенная формула Disorder2 + полный список YouTube и Discord):
+                string udpPart = quicBin != null
+                    ? $"--filter-udp=443{hostListArg} --dpi-desync=fake --dpi-desync-repeats=4 --dpi-desync-fake-quic=\"{quicBin}\" --new "
+                    : $"--filter-udp=443{hostListArg} --dpi-desync=fake --dpi-desync-repeats=4 --new ";
 
-                string youtubeTcpRule = $"--filter-tcp=443{googleHostListArg} --ip-id=zero --dpi-desync=multisplit --dpi-desync-split-seqovl=681 --dpi-desync-split-pos=1{seqOvlPattern} --new ";
-
-                string generalTcpRule = $"--filter-tcp=80,443{allHostLists} --ip-id=zero --dpi-desync=multisplit --dpi-desync-split-seqovl=568 --dpi-desync-split-pos=1{seqOvlPattern}";
-
-                return $"{wfPorts} {discordVoiceUdp}{quicUdp}{youtubeTcpRule}{generalTcpRule}";
+                return $"--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443,50000-50099 " +
+                       $"--filter-udp=50000-50099 --dpi-desync=fake --dpi-desync-any-protocol=1 --dpi-desync-repeats=6 --new " +
+                       $"{udpPart}" +
+                       $"--filter-tcp=80,443{hostListArg} --dpi-desync=disorder2 --dpi-desync-split-pos=1";
             }
         }
 
@@ -384,9 +426,9 @@ namespace DnsSwitcherPro
         {
             return config.DpiStrategyProfile switch
             {
-                2 => "Профиль #2 (ALT Fake+TS)",
-                3 => "Профиль #3 (Multidisorder)",
-                _ => "Профиль #1 (General YouTube)"
+                2 => "Профиль #2 (Split2 YouTube)",
+                3 => "Профиль #3 (Глобальный без списков)",
+                _ => "Профиль #1 (Disorder2 Проверенный)"
             };
         }
 
@@ -394,7 +436,7 @@ namespace DnsSwitcherPro
         {
             try
             {
-                StopDpiBypass();
+                StopDpiBypass(restoreQuic: false);
 
                 string baseDir = AppDomain.CurrentDomain.BaseDirectory;
                 string dpiDir = Path.Combine(baseDir, "dpi");
@@ -416,6 +458,7 @@ namespace DnsSwitcherPro
                     return false;
                 }
 
+                SetBrowserQuicPolicy(disableQuic: true);
                 string args = BuildZapretArguments(dpiDir);
 
                 var psi = new ProcessStartInfo(winwsPath, args)
@@ -428,22 +471,7 @@ namespace DnsSwitcherPro
 
                 dpiProcess = Process.Start(psi);
 
-                Task.Delay(350).Wait();
-                if (dpiProcess == null || dpiProcess.HasExited)
-                {
-                    // Если winws не принял сложный ключ, запускаем безотказный резервный режим для YouTube и Discord
-                    string fallbackArgs = "--wf-tcp=80,443 --wf-udp=443,50000-50100 --filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --new --filter-tcp=80,443 --dpi-desync=multisplit --dpi-desync-split-pos=1,midsld";
-                    var fallbackPsi = new ProcessStartInfo(winwsPath, fallbackArgs)
-                    {
-                        CreateNoWindow = true,
-                        UseShellExecute = false,
-                        WindowStyle = ProcessWindowStyle.Hidden,
-                        WorkingDirectory = dpiDir
-                    };
-                    dpiProcess = Process.Start(fallbackPsi);
-                    Task.Delay(250).Wait();
-                }
-
+                Task.Delay(300).Wait();
                 if (dpiProcess == null || dpiProcess.HasExited)
                 {
                     config.EnableDpiBypass = false;
@@ -459,6 +487,8 @@ namespace DnsSwitcherPro
                     }
                     return false;
                 }
+
+                RunCommand("ipconfig /flushdns");
 
                 config.EnableDpiBypass = true;
                 SaveConfig();
@@ -479,7 +509,7 @@ namespace DnsSwitcherPro
             }
         }
 
-        private void StopDpiBypass()
+        private void StopDpiBypass(bool restoreQuic = true)
         {
             try
             {
@@ -504,6 +534,11 @@ namespace DnsSwitcherPro
                     }
                 }
 
+                if (restoreQuic)
+                {
+                    SetBrowserQuicPolicy(disableQuic: false);
+                }
+
                 RunCommand("sc stop WinDivert");
                 RunCommand("sc stop WinDivert14");
             }
@@ -514,7 +549,7 @@ namespace DnsSwitcherPro
         {
             if (config.EnableDpiBypass)
             {
-                StopDpiBypass();
+                StopDpiBypass(restoreQuic: true);
                 config.EnableDpiBypass = false;
                 SaveConfig();
                 UpdateDpiButtonVisualState();
@@ -780,7 +815,7 @@ namespace DnsSwitcherPro
                             ["mode"] = "automatic",
                             ["templates"] = ""
                         };
-                        File.WriteAllText(b.LocalStatePath, rootNode.ToJsonString(), Encoding.UTF8);
+                        File.WriteAllText(b.LocalStatePath, rootNode.ToJsonString(), Utf8NoBom);
                     }
                 }
                 catch { }
@@ -1104,7 +1139,7 @@ namespace DnsSwitcherPro
                     cleaned.Add(HostsBlockEndMarker);
                 }
 
-                File.WriteAllLines(hostsPath, cleaned, Encoding.UTF8);
+                File.WriteAllLines(hostsPath, cleaned, Utf8NoBom);
                 RunCommand("ipconfig /flushdns");
             }
             catch { }
@@ -2379,12 +2414,12 @@ namespace DnsSwitcherPro
 
             var profiles = new (int id, string title, string desc)[]
             {
-                (1, "Профиль #1 — General (Multisplit + SeqOvl 681 для YouTube)",
-                    "Основная стратегия Flowseal: спец-правило для list-google.txt (YouTube) + обход для Discord (включая голос) и сайтов."),
-                (2, "Профиль #2 — ALT (Fake + Multidisorder + TS)",
-                    "Отправка TLS-фейков с параметром fooling=ts (не рвёт соединение с Google в отличие от badseq). Выбирайте, если на #1 не грузится YouTube."),
-                (3, "Профиль #3 — Универсальный Multidisorder (Без фейков)",
-                    "Чистая десинхронизация пакетов на 1,midsld для любых HTTPS-сайтов, YouTube и Discord без отправки фейковых пакетов.")
+                (1, "Профиль #1 — Disorder2 + YouTube/Discord (Проверенный)",
+                    "Та самая формула, на которой открывается Discord, дополненная чистым списком всех доменов и видеосерверов YouTube."),
+                (2, "Профиль #2 — Split2 + SeqOvl=1 (Для YouTube)",
+                    "Мягкое разделение TLS SNI с перекрытием 1 байта без badseq. Не сбрасывает соединения с серверами Google."),
+                (3, "Профиль #3 — Глобальный Disorder2 (Без списков)",
+                    "Применяет проверенную формулу Disorder2 вообще ко всем сайтам и кэш-серверам YouTube без фильтрации по спискам.")
             };
 
             foreach (var p in profiles)
@@ -2775,7 +2810,7 @@ namespace DnsSwitcherPro
                 if (sfd.ShowDialog() == true)
                 {
                     string json = JsonSerializer.Serialize(serverList, new JsonSerializerOptions { WriteIndented = true });
-                    File.WriteAllText(sfd.FileName, json, Encoding.UTF8);
+                    File.WriteAllText(sfd.FileName, json, Utf8NoBom);
                 }
                 dlg.Close();
             }));
@@ -2889,7 +2924,7 @@ namespace DnsSwitcherPro
             menu.Items.Add(new Forms.ToolStripSeparator());
             menu.Items.Add("Выход", null, (s, e) =>
             {
-                StopDpiBypass();
+                StopDpiBypass(restoreQuic: true);
                 trayIcon.Visible = false;
                 Environment.Exit(0);
             });
@@ -2931,7 +2966,7 @@ namespace DnsSwitcherPro
             {
                 config.Servers = serverList;
                 string json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
-                File.WriteAllText(configPath, json, Encoding.UTF8);
+                File.WriteAllText(configPath, json, Utf8NoBom);
             }
             catch { }
         }
