@@ -33,7 +33,7 @@ jobs:
           name: DNS-Switcher-Pro-Android-APK
           path: app/build/outputs/apk/debug/app-debug.apk
 
-  # Поток 2: Сборка Windows-установщика со встроенным Zapret Discord + YouTube
+  # Поток 2: Сборка Windows-установщика со встроенным Zapret DPI
   build-windows:
     runs-on: windows-latest
     steps:
@@ -49,9 +49,9 @@ jobs:
         working-directory: ./windows
         shell: pwsh
         run: |
-          if (Test-Path "1000258844.ico") { Copy-Item "1000258844.ico" "icon.ico" -Force; }
-          elseif (Test-Path "../1000258844.ico") { Copy-Item "../1000258844.ico" "icon.ico" -Force; }
-          elseif (Test-Path "../icon.ico") { Copy-Item "../icon.ico" "icon.ico" -Force; }
+          if (Test-Path "1000258844.ico") { [System.IO.File]::Copy("1000258844.ico", "icon.ico", $true); }
+          elseif (Test-Path "../1000258844.ico") { [System.IO.File]::Copy("../1000258844.ico", "icon.ico", $true); }
+          elseif (Test-Path "../icon.ico") { [System.IO.File]::Copy("../icon.ico", "icon.ico", $true); }
           if (-not (Test-Path "icon.ico")) { Write-Error "icon.ico not found!"; exit 1; }
 
       - name: Publish Standalone EXE
@@ -62,45 +62,52 @@ jobs:
         working-directory: ./windows
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          $dpiDir = "$PWD\publish\dpi"
-          $dpiListsDir = "$PWD\publish\dpi\lists"
-          if (-not (Test-Path $dpiDir)) { New-Item -ItemType Directory -Path $dpiDir -Force | Out-Null }
-          if (-not (Test-Path $dpiListsDir)) { New-Item -ItemType Directory -Path $dpiListsDir -Force | Out-Null }
+          $ErrorActionPreference = "Stop";
+          $dpiDir = Join-Path $PWD "publish\dpi";
+          $listsDir = Join-Path $dpiDir "lists";
+          [System.IO.Directory]::CreateDirectory($dpiDir) | Out-Null;
+          [System.IO.Directory]::CreateDirectory($listsDir) | Out-Null;
 
-          Write-Host "Клонирование актуальной сборки Flowseal/zapret-discord-youtube..."
-          $bundleDir = "$PWD\zapret_dy"
-          if (Test-Path $bundleDir) { Remove-Item $bundleDir -Recurse -Force }
+          Write-Host "Клонирование актуальной сборки Flowseal/zapret-discord-youtube...";
+          $repoDir = Join-Path $PWD "zapret_dy";
+          if (Test-Path $repoDir) { Remove-Item -Path $repoDir -Recurse -Force; }
 
-          git clone --depth 1 https://github.com/Flowseal/zapret-discord-youtube.git $bundleDir
+          git clone --depth 1 https://github.com/Flowseal/zapret-discord-youtube.git $repoDir;
 
-          if (-not (Test-Path "$bundleDir\bin\winws.exe")) {
-              Write-Error "winws.exe не найден в Flowseal/zapret-discord-youtube!"
-              exit 1
+          $binSource = Join-Path $repoDir "bin";
+          $listsSource = Join-Path $repoDir "lists";
+
+          if (Test-Path $binSource) {
+              Copy-Item -Path "$binSource\*" -Destination $dpiDir -Recurse -Force;
+          }
+          if (Test-Path $listsSource) {
+              Copy-Item -Path "$listsSource\*" -Destination $listsDir -Recurse -Force;
+              Copy-Item -Path "$listsSource\*" -Destination $dpiDir -Recurse -Force;
           }
 
-          # Копируем все бинарники и фейк-пакеты (.bin, .dll, .sys, winws.exe) в publish\dpi
-          Copy-Item "$bundleDir\bin\*" $dpiDir -Recurse -Force
-
-          # Копируем все списки доменов (list-general.txt, list-google.txt, ipset-all.txt и др.) в publish\dpi\lists
-          if (Test-Path "$bundleDir\lists") {
-              Copy-Item "$bundleDir\lists\*" $dpiListsDir -Recurse -Force
+          # Если в репозитории Flowseal бинарники лежат в другом месте, догружаем из bol-van/zapret-win-bundle
+          if (-not (Test-Path (Join-Path $dpiDir "winws.exe"))) {
+              Write-Host "Догрузка winws.exe из bol-van/zapret-win-bundle...";
+              $bundleDir = Join-Path $PWD "zapret_bundle";
+              git clone --depth 1 https://github.com/bol-van/zapret-win-bundle.git $bundleDir;
+              $winwsSrc = Join-Path $bundleDir "zapret-winws";
+              Copy-Item -Path "$winwsSrc\*" -Destination $dpiDir -Recurse -Force;
+              Remove-Item -Path $bundleDir -Recurse -Force;
           }
 
-          Remove-Item $bundleDir -Recurse -Force
+          Remove-Item -Path $repoDir -Recurse -Force;
 
-          Write-Host "Файлы в папке publish\dpi:"
-          Get-ChildItem $dpiDir | Select-Object Name, Length
+          Write-Host "Файлы в папке publish\dpi:";
+          Get-ChildItem -Path $dpiDir | ForEach-Object { Write-Host (" - " + $_.Name + " (" + $_.Length + " bytes)") };
 
-          # Гарантируем упаковку папки publish\dpi и вложенной папки lists в installer.iss
-          $issPath = "$PWD\installer.iss"
+          $issPath = Join-Path $PWD "installer.iss";
           if (Test-Path $issPath) {
-              $issContent = Get-Content $issPath -Raw
-              if ($issContent -notmatch "publish\\dpi") {
-                  Write-Host "Добавляем упаковку папки dpi в installer.iss..."
-                  $dpiLine = "Source: ""publish\dpi\*""; DestDir: ""{app}\dpi""; Flags: ignoreversion recursesubdirs createallsubdirs"
-                  $issContent = $issContent -replace "(\[Files\])", "`$1`r`n$dpiLine"
-                  Set-Content -Path $issPath -Value$issContent -Encoding UTF8
+              $issContent = [System.IO.File]::ReadAllText($issPath);
+              if (-not $issContent.Contains("publish\dpi")) {
+                  Write-Host "Добавляем упаковку папки dpi в installer.iss...";
+                  $dpiLine = 'Source: "publish\dpi\*"; DestDir: "{app}\dpi"; Flags: ignoreversion recursesubdirs createallsubdirs';
+                  $issContent = $issContent.Replace("[Files]", "[Files]`r`n" + $dpiLine);
+                  [System.IO.File]::WriteAllText($issPath, $issContent, [System.Text.Encoding]::UTF8);
               }
           }
 
