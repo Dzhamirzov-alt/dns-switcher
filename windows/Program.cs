@@ -50,6 +50,7 @@ namespace DnsSwitcherPro
         public bool BlockIpv6 { get; set; } = true;
         public bool AutoFixBrowserDns { get; set; } = false;
         public bool EnableDpiBypass { get; set; } = false;
+        public int DpiStrategyProfile { get; set; } = 1; // 1 = Disorder2 (Safe), 2 = Fake+Split2, 3 = Light Split
         public bool StartWithWindows { get; set; } = true;
         public bool FirstRunCompleted { get; set; } = false;
         public string CurrentMode { get; set; } = "off";
@@ -100,7 +101,7 @@ namespace DnsSwitcherPro
         private Border pingBtnBorder = null!;
         private TextBlock pingBtnText = null!;
         private Border clearGeminiCacheBtn = null!;
-        private Border dpiBypassBtn = null!; // Кнопка обхода DPI на главной панели
+        private Border dpiBypassBtn = null!;
         private TextBlock dpiBypassText = null!;
 
         // Плашка предупреждения о конфликте DNS в браузере
@@ -241,10 +242,9 @@ namespace DnsSwitcherPro
                     await Task.Run(() => SetAutoStartTask(true));
                 }
 
-                // Управление встроенным движком Zapret DPI при запуске
                 if (config.EnableDpiBypass)
                 {
-                    StartDpiBypass();
+                    StartDpiBypass(silent: true);
                 }
 
                 await Task.Run(() => EnforceIpv6Policy());
@@ -269,7 +269,6 @@ namespace DnsSwitcherPro
 
             Closing += (s, e) =>
             {
-                StopDpiBypass();
                 e.Cancel = true;
                 Hide();
                 trayIcon.ShowBalloonTip(
@@ -280,33 +279,129 @@ namespace DnsSwitcherPro
             };
         }
 
-        // Управление встроенным движком обхода DPI (Zapret winws.exe)
-        private void StartDpiBypass()
+        // Формирование безопасной командной строки для winws.exe (без поломки обычных сайтов и Wi-Fi адаптеров)
+        private string BuildZapretArguments(string dpiDir)
+        {
+            string quicBin = Path.Combine(dpiDir, "quic_initial_www_google_com.bin");
+            string tlsBin = Path.Combine(dpiDir, "tls_clienthello_www_google_com.bin");
+            bool hasQuicBin = File.Exists(quicBin);
+            bool hasTlsBin = File.Exists(tlsBin);
+
+            int profile = config.DpiStrategyProfile;
+
+            if (profile == 2)
+            {
+                // Профиль 2: Fake + Split2 с badseq (для жёстких ТСПУ)
+                string udpPart = hasQuicBin
+                    ? $"--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic=\"{quicBin}\" --new "
+                    : "--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --new ";
+
+                string tcpPart = hasTlsBin
+                    ? $"--filter-tcp=80,443 --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-autottl=2 --dpi-desync-fooling=badseq --dpi-desync-fake-tls=\"{tlsBin}\""
+                    : "--filter-tcp=80,443 --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-autottl=2 --dpi-desync-fooling=badseq";
+
+                return $"--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443 {udpPart}{tcpPart}";
+            }
+            else if (profile == 3)
+            {
+                // Профиль 3: Мягкий (только фрагментация TCP без UDP и без фейк-пакетов)
+                return "--wf-l3=ipv4 --wf-tcp=80,443 --filter-tcp=80,443 --dpi-desync=split2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=1";
+            }
+            else
+            {
+                // Профиль 1 (По умолчанию — самый стабильный):
+                // Десинхронизация disorder2 (split-pos=1) для TCP 80,443 без отправки битых TCP-флагов + Fake QUIC для YouTube/Discord
+                string udpPart = hasQuicBin
+                    ? $"--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=4 --dpi-desync-fake-quic=\"{quicBin}\" --new "
+                    : "--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=4 --new ";
+
+                return $"--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443 {udpPart}--filter-tcp=80,443 --dpi-desync=disorder2 --dpi-desync-split-pos=1";
+            }
+        }
+
+        private string GetDpiProfileShortName()
+        {
+            return config.DpiStrategyProfile switch
+            {
+                2 => "Профиль #2 (Fake+Split)",
+                3 => "Профиль #3 (Мягкий TCP)",
+                _ => "Профиль #1 (Disorder2)"
+            };
+        }
+
+        private bool StartDpiBypass(bool silent = false)
         {
             try
             {
                 StopDpiBypass();
-                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-                string winwsPath = Path.Combine(baseDir, "dpi", "winws.exe");
-                if (!File.Exists(winwsPath)) return;
 
-                // Современная универсальная стратегия обхода ТСПУ для HTTPS (SNI) и UDP/QUIC (YouTube / Discord)
-                string args = "--wf-tcp=80,443 --wf-udp=443 --dpi-desync=fake --dpi-desync-split-pos=1 --dpi-desync-fooling=md5sig";
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                string dpiDir = Path.Combine(baseDir, "dpi");
+                string winwsPath = Path.Combine(dpiDir, "winws.exe");
+
+                if (!File.Exists(winwsPath))
+                {
+                    config.EnableDpiBypass = false;
+                    SaveConfig();
+                    UpdateDpiButtonVisualState();
+                    if (!silent)
+                    {
+                        MessageBox.Show(
+                            $"Файл движка не найден по пути:\n{winwsPath}\n\nПереустановите программу из свежего установщика.",
+                            "Ошибка запуска Zapret",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Warning);
+                    }
+                    return false;
+                }
+
+                string args = BuildZapretArguments(dpiDir);
 
                 var psi = new ProcessStartInfo(winwsPath, args)
                 {
                     CreateNoWindow = true,
                     UseShellExecute = false,
                     WindowStyle = ProcessWindowStyle.Hidden,
-                    WorkingDirectory = Path.Combine(baseDir, "dpi")
+                    WorkingDirectory = dpiDir
                 };
 
                 dpiProcess = Process.Start(psi);
+
+                // Проверяем, что процесс не завершился с ошибкой в первые 300 мс
+                Task.Delay(300).Wait();
+                if (dpiProcess == null || dpiProcess.HasExited)
+                {
+                    config.EnableDpiBypass = false;
+                    SaveConfig();
+                    UpdateDpiButtonVisualState();
+                    if (!silent)
+                    {
+                        MessageBox.Show(
+                            "Процесс winws.exe завершился сразу после старта.\nПроверьте, что папка программы добавлена в исключения антивируса (для драйвера WinDivert64.sys).",
+                            "Обход DPI не запустился",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Warning);
+                    }
+                    return false;
+                }
+
                 config.EnableDpiBypass = true;
                 SaveConfig();
                 UpdateDpiButtonVisualState();
+                UpdateTrayMenu();
+                return true;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                config.EnableDpiBypass = false;
+                SaveConfig();
+                UpdateDpiButtonVisualState();
+                if (!silent)
+                {
+                    MessageBox.Show($"Ошибка при запуске обхода DPI: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+                return false;
+            }
         }
 
         private void StopDpiBypass()
@@ -320,11 +415,23 @@ namespace DnsSwitcherPro
                 }
                 dpiProcess = null;
 
-                // Также принудительно гасим зависшие экземпляры winws
                 foreach (var p in Process.GetProcessesByName("winws"))
                 {
-                    try { p.Kill(); } catch { }
+                    try
+                    {
+                        p.Kill();
+                        p.WaitForExit(1000);
+                    }
+                    catch { }
+                    finally
+                    {
+                        p.Dispose();
+                    }
                 }
+
+                // Обязательно останавливаем ядерный драйвер перехвата пакетов WinDivert, чтобы он не держал сокеты
+                RunCommand("sc stop WinDivert");
+                RunCommand("sc stop WinDivert14");
             }
             catch { }
         }
@@ -337,15 +444,11 @@ namespace DnsSwitcherPro
                 config.EnableDpiBypass = false;
                 SaveConfig();
                 UpdateDpiButtonVisualState();
-                MessageBox.Show("🛡️ Обход DPI отключен.", "DNS Switcher Pro", MessageBoxButton.OK, MessageBoxImage.Information);
+                UpdateTrayMenu();
             }
             else
             {
-                StartDpiBypass();
-                config.EnableDpiBypass = true;
-                SaveConfig();
-                UpdateDpiButtonVisualState();
-                MessageBox.Show("🛡️ Обход DPI успешно запущен!\nТрафик сайтов, YouTube и Discord оптимизирован.", "DNS Switcher Pro", MessageBoxButton.OK, MessageBoxImage.Information);
+                StartDpiBypass(silent: false);
             }
         }
 
@@ -354,7 +457,7 @@ namespace DnsSwitcherPro
             if (dpiBypassText == null || dpiBypassBtn == null) return;
             if (config.EnableDpiBypass)
             {
-                dpiBypassText.Text = "🛡️ Обход DPI: ВКЛЮЧЕН (YouTube, Discord, Сайты)";
+                dpiBypassText.Text = $"🛡️ Обход DPI: ВКЛЮЧЕН • {GetDpiProfileShortName()}";
                 dpiBypassText.Foreground = BrushFromHex(accentColorHex);
                 dpiBypassBtn.Background = BrushFromHex(accentCardBgHex);
                 dpiBypassBtn.BorderBrush = BrushFromHex(accentColorHex);
@@ -1293,7 +1396,7 @@ namespace DnsSwitcherPro
             clearGeminiCacheBtn.MouseLeftButtonUp += (s, e) => ClearGeminiCookiesAndCache();
             mainLayout.Children.Add(clearGeminiCacheBtn);
 
-            // Кнопка переключения обхода DPI на главной панели
+            // Кнопка переключения обхода DPI на главной панели (левый клик — вкл/выкл, правый клик — выбор профиля)
             dpiBypassText = new TextBlock
             {
                 FontSize = 12,
@@ -1311,6 +1414,7 @@ namespace DnsSwitcherPro
                 Child = dpiBypassText
             };
             dpiBypassBtn.MouseLeftButtonUp += (s, e) => ToggleDpiBypass();
+            dpiBypassBtn.MouseRightButtonUp += (s, e) => ShowDpiProfileDialog(returnToNetworkSettings: false);
             UpdateDpiButtonVisualState();
             mainLayout.Children.Add(dpiBypassBtn);
 
@@ -2092,7 +2196,7 @@ namespace DnsSwitcherPro
                 ShowBenchmarkDialog();
             }));
 
-            root.Children.Add(CreateMenuCard("🌐 Сетевые настройки", "Обход DPI, контроль браузеров, защита IPv6, DoH", () =>
+            root.Children.Add(CreateMenuCard("🌐 Сетевые настройки", "Обход DPI (Zapret), профиль DPI, браузеры, IPv6, DoH", () =>
             {
                 dlg.Close();
                 ShowNetworkSettingsDialog();
@@ -2205,7 +2309,6 @@ namespace DnsSwitcherPro
             dlg.ShowDialog();
         }
 
-        // Сетевые настройки с управлением обходом DPI
         private void ShowNetworkSettingsDialog()
         {
             var dlg = CreateModalDialog("Сетевые настройки", () => ShowSettingsDialog());
@@ -2220,13 +2323,22 @@ namespace DnsSwitcherPro
                     ? $"⚠️ Обнаружен конфликт ({string.Join(", ", browserConflicts.Select(c => c.BrowserName))})! Нажмите для решения"
                     : "Сейчас: Мониторинг активен (конфликтов не обнаружено)");
 
-            root.Children.Add(CreateMenuCard("🛡️ Обход DPI (Zapret)",
-                config.EnableDpiBypass ? "Сейчас: Включен (YouTube, Discord, сайты активны)" : "Сейчас: Отключен", () =>
+            root.Children.Add(CreateMenuCard("🛡️ Обход DPI (Zapret) — Вкл / Выкл",
+                config.EnableDpiBypass
+                    ? $"Сейчас: ВКЛЮЧЕН • {GetDpiProfileShortName()}"
+                    : "Сейчас: Отключен", () =>
             {
                 ToggleDpiBypass();
                 dlg.Close();
                 ShowNetworkSettingsDialog();
             }, config.EnableDpiBypass ? accentColorHex : null));
+
+            root.Children.Add(CreateMenuCard("⚙️ Выбор профиля обхода DPI",
+                $"Текущий режим: {GetDpiProfileShortName()} (нажмите для смены метода)", () =>
+            {
+                dlg.Close();
+                ShowDpiProfileDialog(returnToNetworkSettings: true);
+            }));
 
             root.Children.Add(CreateMenuCard("🌐 Контроль DNS в браузерах (Chrome / Edge / Brave / Яндекс)", browserStatusSub, () =>
             {
@@ -2278,6 +2390,65 @@ namespace DnsSwitcherPro
             {
                 dlg.Close();
                 ShowSettingsDialog();
+            }));
+
+            dlg.Content = new Border
+            {
+                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(20),
+                Padding = new Thickness(22, 18, 22, 18),
+                Child = root
+            };
+            dlg.ShowDialog();
+        }
+
+        // Окно выбора стратегии обхода DPI
+        private void ShowDpiProfileDialog(bool returnToNetworkSettings)
+        {
+            var dlg = CreateModalDialog("Профиль обхода DPI", () =>
+            {
+                if (returnToNetworkSettings) ShowNetworkSettingsDialog();
+            });
+
+            var root = new StackPanel();
+            root.Children.Add(CreateDialogHeader("🛡️ Профиль обхода DPI (Zapret)"));
+
+            var profiles = new (int id, string title, string desc)[]
+            {
+                (1, "Профиль #1 — Disorder2 + QUIC (Рекомендуемый)",
+                    "Безопасная десинхронизация первого байта SNI без фейковых TCP-пакетов. Не блокирует обычные сайты и Wi-Fi роутеры, ускоряет YouTube и Discord."),
+                (2, "Профиль #2 — Fake + Split2 (Для жёстких ТСПУ)",
+                    "Отправка маскировочных пакетов с подменой badseq и autottl=2. Используйте, если на Профиле #1 не грузится видео на YouTube."),
+                (3, "Профиль #3 — Мягкий (Только фрагментация TCP)",
+                    "Лёгкое разделение TLS-пакетов на портах 80/443 без вмешательства в UDP. Максимальная совместимость с любыми сайтами.")
+            };
+
+            foreach (var p in profiles)
+            {
+                bool isSel = config.DpiStrategyProfile == p.id;
+                root.Children.Add(CreateMenuCard(p.title, p.desc, () =>
+                {
+                    config.DpiStrategyProfile = p.id;
+                    SaveConfig();
+                    if (config.EnableDpiBypass)
+                    {
+                        StartDpiBypass(silent: false);
+                    }
+                    else
+                    {
+                        UpdateDpiButtonVisualState();
+                    }
+                    dlg.Close();
+                    if (returnToNetworkSettings) ShowNetworkSettingsDialog();
+                }, isSel ? accentColorHex : null, isSel ? accentColorHex : null));
+            }
+
+            root.Children.Add(CreateDialogButton("Назад", textSubColorHex, () =>
+            {
+                dlg.Close();
+                if (returnToNetworkSettings) ShowNetworkSettingsDialog();
             }));
 
             dlg.Content = new Border
@@ -2748,6 +2919,13 @@ namespace DnsSwitcherPro
             });
             menu.Items.Add(new Forms.ToolStripSeparator());
 
+            string dpiLabel = config.EnableDpiBypass
+                ? $"✔ 🛡️ Обход DPI: ВКЛ ({GetDpiProfileShortName()})"
+                : "    🛡️ Обход DPI: ВЫКЛ";
+            menu.Items.Add(dpiLabel, null, (s, e) => ToggleDpiBypass());
+
+            menu.Items.Add(new Forms.ToolStripSeparator());
+
             foreach (var srv in serverList)
             {
                 bool isCurrent = config.CurrentMode == "on" &&
@@ -2781,6 +2959,10 @@ namespace DnsSwitcherPro
                     if (loaded != null)
                     {
                         config = loaded;
+                        if (config.DpiStrategyProfile < 1 || config.DpiStrategyProfile > 3)
+                        {
+                            config.DpiStrategyProfile = 1;
+                        }
                         serverList = config.Servers ?? new List<DnsServer>();
                     }
                 }
