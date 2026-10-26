@@ -82,6 +82,7 @@ namespace DnsSwitcherPro
         private static readonly UTF8Encoding Utf8NoBom = new UTF8Encoding(false);
 
         private Process? dpiProcess = null;
+        private bool isStartingDpi = false;
 
         private ScrollViewer rootScroll = null!;
         private StackPanel mainLayout = null!;
@@ -223,11 +224,12 @@ namespace DnsSwitcherPro
                 undoTimer.Stop();
             };
 
-            ipv6GuardTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(2000) };
+            ipv6GuardTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(2500) };
             ipv6GuardTimer.Tick += (s, e) =>
             {
                 EnforceGeminiIpv6Guard();
                 MonitorBrowserDnsSettings(showPopupOnConflict: false);
+                EnsureDpiProcessAlive();
             };
 
             Loaded += async (s, e) =>
@@ -241,7 +243,7 @@ namespace DnsSwitcherPro
 
                 if (config.EnableDpiBypass)
                 {
-                    StartDpiBypass(silent: true);
+                    await Task.Run(() => StartDpiBypass(silent: true));
                 }
 
                 await Task.Run(() => EnforceIpv6Policy());
@@ -276,6 +278,20 @@ namespace DnsSwitcherPro
             };
         }
 
+        // Контроль живучести winws.exe: если процесс упал в фоне при включённом тумблере — перезапускаем автоматически
+        private void EnsureDpiProcessAlive()
+        {
+            if (!config.EnableDpiBypass || isStartingDpi) return;
+            try
+            {
+                if (Process.GetProcessesByName("winws").Length == 0)
+                {
+                    StartDpiBypass(silent: true);
+                }
+            }
+            catch { }
+        }
+
         private string? FindDpiAsset(string dpiDir, string fileName)
         {
             string direct = Path.Combine(dpiDir, fileName);
@@ -285,8 +301,6 @@ namespace DnsSwitcherPro
             return null;
         }
 
-        // Собираем единый чистый файл list-combined.txt БЕЗ BOM (UTF-8 without BOM),
-        // объединяющий list-general.txt, list-google.txt и обязательные домены YouTube + Discord
         private string BuildCombinedHostlistFile(string dpiDir)
         {
             var domains = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -311,13 +325,18 @@ namespace DnsSwitcherPro
                 "wide-youtube.l.google.com",
                 "play.google.com",
                 "gstatic.com",
+                "googleapis.com",
+                "nhacmp3youtube.com",
                 "discord.com",
+                "www.discord.com",
                 "discordapp.com",
                 "discordapp.net",
                 "discord.gg",
                 "discord.media",
                 "discordcdn.com",
-                "discordstatus.com"
+                "discordstatus.com",
+                "dis.gd",
+                "discord-attachments-uploads-prd.storage.googleapis.com"
             };
 
             string[] sourceFiles = new[] { "list-general.txt", "list-google.txt", "russia-youtube.txt", "russia-discord.txt" };
@@ -351,74 +370,120 @@ namespace DnsSwitcherPro
             return combinedPath;
         }
 
-        // Отключение зависающего UDP/QUIC в браузерах на время работы обхода DPI,
-        // чтобы Яндекс.Браузер и Chrome сразу открывали YouTube по стабильному TCP 443
-        private void SetBrowserQuicPolicy(bool disableQuic)
+        // 1. Отключаем QUIC (UDP 443) и Post-Quantum Kyber/ML-KEM в браузерах через системные политики,
+        // чтобы после перезапуска браузера пакет TLS ClientHello не раздувался на 2 сегмента и не ломал обход DPI
+        private void SetBrowserDpiOptimizationPolicies(bool enableOptimization)
         {
             foreach (var b in GetInstalledBrowsersTargetList())
             {
-                if (!File.Exists(b.LocalStatePath)) continue;
                 try
                 {
                     using var polKey = Registry.LocalMachine.CreateSubKey(b.PolicyPath, true);
-                    if (disableQuic)
+                    if (enableOptimization)
                     {
                         polKey?.SetValue("QuicAllowed", 0, RegistryValueKind.DWord);
+                        polKey?.SetValue("PostQuantumKeyAgreementEnabled", 0, RegistryValueKind.DWord);
+                        polKey?.SetValue("TLS13HardeningForLocalAnchorsEnabled", 0, RegistryValueKind.DWord);
                     }
                     else
                     {
                         polKey?.DeleteValue("QuicAllowed", false);
+                        polKey?.DeleteValue("PostQuantumKeyAgreementEnabled", false);
+                        polKey?.DeleteValue("TLS13HardeningForLocalAnchorsEnabled", false);
                     }
                 }
                 catch { }
             }
+
+            // Дополнительно очищаем кэш заблокированных QUIC/Alt-Svc сессий в профилях браузеров
+            if (enableOptimization)
+            {
+                ClearBrowserBrokenQuicState();
+            }
         }
 
-        // Проверенная рабочая формула запуска winws.exe (с --wf-l3=ipv4), на которой работает Discord + добавлен YouTube
+        // Очистка файла Network Persistent State (чтобы после перезапуска браузер не цеплялся к мёртвым QUIC/IP сессиям YouTube и Discord)
+        private void ClearBrowserBrokenQuicState()
+        {
+            try
+            {
+                string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                string[] userDataRoots = new[]
+                {
+                    Path.Combine(local, @"Yandex\YandexBrowser\User Data"),
+                    Path.Combine(local, @"Google\Chrome\User Data"),
+                    Path.Combine(local, @"Microsoft\Edge\User Data"),
+                    Path.Combine(local, @"BraveSoftware\Brave-Browser\User Data")
+                };
+
+                foreach (var root in userDataRoots)
+                {
+                    if (!Directory.Exists(root)) continue;
+                    foreach (var profileDir in Directory.GetDirectories(root))
+                    {
+                        string netStateFile = Path.Combine(profileDir, "Network", "Network Persistent State");
+                        string netStateOld = Path.Combine(profileDir, "Network Persistent State");
+                        try { if (File.Exists(netStateFile)) File.Delete(netStateFile); } catch { }
+                        try { if (File.Exists(netStateOld)) File.Delete(netStateOld); } catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // Полный сброс сокетов, DNS-кэша и TCP-параметров перед запуском Zapret
+        private void FlushSystemNetworkSockets()
+        {
+            RunCommand("ipconfig /flushdns");
+            RunCommand("arp -d *");
+            // Включаем ECN и нормализацию временных меток TCP для стабильного прохождения ТСПУ
+            RunCommand("netsh int tcp set global timestamps=enabled");
+        }
+
+        // Обновлённый блок стратегий Zapret:
+        // Использует глобальный перехват TCP 80,443 без зависимости от того, совпал ли поддомен кеш-сервера YouTube со списком,
+        // а также обрабатывает TLS Session Ticket при повторных открытиях браузера
         private string BuildZapretArguments(string dpiDir)
         {
             string? quicBin = FindDpiAsset(dpiDir, "quic_initial_www_google_com.bin");
             string? tlsBin = FindDpiAsset(dpiDir, "tls_clienthello_www_google_com.bin");
             string combinedList = BuildCombinedHostlistFile(dpiDir);
-            string hostListArg = File.Exists(combinedList) ? $" --hostlist=\"{combinedList}\"" : "";
+
+            string udpQuicPart = quicBin != null
+                ? $"--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic=\"{quicBin}\" --new "
+                : "--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --new ";
+
+            string discordVoicePart =
+                "--filter-udp=50000-50099 --filter-l7=discord,stun --dpi-desync=fake --dpi-desync-repeats=6 --new ";
 
             int profile = config.DpiStrategyProfile;
 
             if (profile == 2)
             {
-                // Профиль #2: Мягкая сегментация Split2 + SeqOvl=1 (без badseq, чтобы Google не сбрасывал соединение)
-                string udpPart = quicBin != null
-                    ? $"--filter-udp=443{hostListArg} --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic=\"{quicBin}\" --new "
-                    : $"--filter-udp=443{hostListArg} --dpi-desync=fake --dpi-desync-repeats=6 --new ";
-
+                // Профиль #2: Multisplit + SeqOvl=2 (разрезает и первый байт, и середину домена midsld — не боится повторных сессий браузера)
+                string patternArg = tlsBin != null ? $" --dpi-desync-split-seqovl-pattern=\"{tlsBin}\"" : "";
                 return $"--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443,50000-50099 " +
-                       $"--filter-udp=50000-50099 --dpi-desync=fake --dpi-desync-any-protocol=1 --dpi-desync-repeats=6 --new " +
-                       $"{udpPart}" +
-                       $"--filter-tcp=80,443{hostListArg} --dpi-desync=split2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=1";
+                       $"{discordVoicePart}" +
+                       $"{udpQuicPart}" +
+                       $"--filter-tcp=80,443 --dpi-desync=multisplit --dpi-desync-split-pos=1,midsld --dpi-desync-split-seqovl=2{patternArg}";
             }
             else if (profile == 3)
             {
-                // Профиль #3: Глобальный Disorder2 для ВСЕХ сайтов и любых кэш-серверов YouTube (без ограничений по списку)
-                string udpPart = quicBin != null
-                    ? $"--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=4 --dpi-desync-fake-quic=\"{quicBin}\" --new "
-                    : "--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=4 --new ";
-
+                // Профиль #3: Fake + Disorder2 с обманом по временным меткам (ts) и поддержкой длинных TLS-пакетов после перезапуска
+                string fakeTlsArg = tlsBin != null ? $" --dpi-desync-fake-tls=\"{tlsBin}\"" : "";
                 return $"--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443,50000-50099 " +
-                       $"--filter-udp=50000-50099 --dpi-desync=fake --dpi-desync-any-protocol=1 --dpi-desync-repeats=6 --new " +
-                       $"{udpPart}" +
-                       "--filter-tcp=80,443 --dpi-desync=disorder2 --dpi-desync-split-pos=1";
+                       $"{discordVoicePart}" +
+                       $"{udpQuicPart}" +
+                       $"--filter-tcp=80,443 --dpi-desync=fake,disorder2 --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts{fakeTlsArg}";
             }
             else
             {
-                // Профиль #1 (По умолчанию — проверенная формула Disorder2 + полный список YouTube и Discord):
-                string udpPart = quicBin != null
-                    ? $"--filter-udp=443{hostListArg} --dpi-desync=fake --dpi-desync-repeats=4 --dpi-desync-fake-quic=\"{quicBin}\" --new "
-                    : $"--filter-udp=443{hostListArg} --dpi-desync=fake --dpi-desync-repeats=4 --new ";
-
+                // Профиль #1 (Основной универсальный):
+                // Двойная десинхронизация multidisorder по точкам (1,midsld) на всех портах 80,443 без привязки к хостлисту (чтобы не слетали региональные серверы YouTube и Discord gateway)
                 return $"--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443,50000-50099 " +
-                       $"--filter-udp=50000-50099 --dpi-desync=fake --dpi-desync-any-protocol=1 --dpi-desync-repeats=6 --new " +
-                       $"{udpPart}" +
-                       $"--filter-tcp=80,443{hostListArg} --dpi-desync=disorder2 --dpi-desync-split-pos=1";
+                       $"{discordVoicePart}" +
+                       $"{udpQuicPart}" +
+                       "--filter-tcp=80,443 --dpi-desync=multidisorder --dpi-desync-split-pos=1,midsld";
             }
         }
 
@@ -426,17 +491,20 @@ namespace DnsSwitcherPro
         {
             return config.DpiStrategyProfile switch
             {
-                2 => "Профиль #2 (Split2 YouTube)",
-                3 => "Профиль #3 (Глобальный без списков)",
-                _ => "Профиль #1 (Disorder2 Проверенный)"
+                2 => "Профиль #2 (Multisplit + SeqOvl)",
+                3 => "Профиль #3 (Fake + Disorder2 TS)",
+                _ => "Профиль #1 (Multidisorder 1,midsld)"
             };
         }
 
         private bool StartDpiBypass(bool silent = false)
         {
+            if (isStartingDpi) return false;
+            isStartingDpi = true;
+
             try
             {
-                StopDpiBypass(restoreQuic: false);
+                StopDpiBypass(restoreBrowserPolicies: false);
 
                 string baseDir = AppDomain.CurrentDomain.BaseDirectory;
                 string dpiDir = Path.Combine(baseDir, "dpi");
@@ -446,21 +514,26 @@ namespace DnsSwitcherPro
                 {
                     config.EnableDpiBypass = false;
                     SaveConfig();
-                    UpdateDpiButtonVisualState();
+                    Dispatcher.Invoke(UpdateDpiButtonVisualState);
                     if (!silent)
                     {
-                        MessageBox.Show(
+                        Dispatcher.Invoke(() => MessageBox.Show(
                             $"Файл движка не найден по пути:\n{winwsPath}\n\nПереустановите программу из свежего установщика.",
                             "Ошибка запуска Zapret",
                             MessageBoxButton.OK,
-                            MessageBoxImage.Warning);
+                            MessageBoxImage.Warning));
                     }
                     return false;
                 }
 
-                SetBrowserQuicPolicy(disableQuic: true);
-                string args = BuildZapretArguments(dpiDir);
+                // 1. Применяем анти-Kyber и анти-QUIC политики для браузеров + чистим залипшие сессии
+                SetBrowserDpiOptimizationPolicies(enableOptimization: true);
 
+                // 2. Сбрасываем системный кэш сокетов и DNS
+                FlushSystemNetworkSockets();
+
+                // 3. Запускаем winws.exe с выбранным профилем
+                string args = BuildZapretArguments(dpiDir);
                 var psi = new ProcessStartInfo(winwsPath, args)
                 {
                     CreateNoWindow = true,
@@ -470,46 +543,71 @@ namespace DnsSwitcherPro
                 };
 
                 dpiProcess = Process.Start(psi);
+                Task.Delay(350).Wait();
 
-                Task.Delay(300).Wait();
+                // Если версия winws.exe не поддерживает ключевое слово midsld — автоматически откатываемся на классический split-pos=1
+                if (dpiProcess == null || dpiProcess.HasExited)
+                {
+                    string fallbackArgs =
+                        "--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443,50000-50099 " +
+                        "--filter-udp=50000-50099 --dpi-desync=fake --dpi-desync-any-protocol=1 --dpi-desync-repeats=6 --new " +
+                        "--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --new " +
+                        "--filter-tcp=80,443 --dpi-desync=disorder2 --dpi-desync-split-pos=1";
+
+                    var fallbackPsi = new ProcessStartInfo(winwsPath, fallbackArgs)
+                    {
+                        CreateNoWindow = true,
+                        UseShellExecute = false,
+                        WindowStyle = ProcessWindowStyle.Hidden,
+                        WorkingDirectory = dpiDir
+                    };
+                    dpiProcess = Process.Start(fallbackPsi);
+                    Task.Delay(300).Wait();
+                }
+
                 if (dpiProcess == null || dpiProcess.HasExited)
                 {
                     config.EnableDpiBypass = false;
                     SaveConfig();
-                    UpdateDpiButtonVisualState();
+                    Dispatcher.Invoke(UpdateDpiButtonVisualState);
                     if (!silent)
                     {
-                        MessageBox.Show(
+                        Dispatcher.Invoke(() => MessageBox.Show(
                             "Процесс winws.exe завершился сразу после старта.\nПроверьте, что папка программы добавлена в исключения антивируса (для драйвера WinDivert64.sys).",
                             "Обход DPI не запустился",
                             MessageBoxButton.OK,
-                            MessageBoxImage.Warning);
+                            MessageBoxImage.Warning));
                     }
                     return false;
                 }
 
-                RunCommand("ipconfig /flushdns");
-
                 config.EnableDpiBypass = true;
                 SaveConfig();
-                UpdateDpiButtonVisualState();
-                UpdateTrayMenu();
+                Dispatcher.Invoke(() =>
+                {
+                    UpdateDpiButtonVisualState();
+                    UpdateTrayMenu();
+                });
                 return true;
             }
             catch (Exception ex)
             {
                 config.EnableDpiBypass = false;
                 SaveConfig();
-                UpdateDpiButtonVisualState();
+                Dispatcher.Invoke(UpdateDpiButtonVisualState);
                 if (!silent)
                 {
-                    MessageBox.Show($"Ошибка при запуске обхода DPI: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    Dispatcher.Invoke(() => MessageBox.Show($"Ошибка при запуске обхода DPI: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Warning));
                 }
                 return false;
             }
+            finally
+            {
+                isStartingDpi = false;
+            }
         }
 
-        private void StopDpiBypass(bool restoreQuic = true)
+        private void StopDpiBypass(bool restoreBrowserPolicies = true)
         {
             try
             {
@@ -525,7 +623,7 @@ namespace DnsSwitcherPro
                     try
                     {
                         p.Kill();
-                        p.WaitForExit(1000);
+                        p.WaitForExit(1200);
                     }
                     catch { }
                     finally
@@ -534,13 +632,15 @@ namespace DnsSwitcherPro
                     }
                 }
 
-                if (restoreQuic)
+                if (restoreBrowserPolicies)
                 {
-                    SetBrowserQuicPolicy(disableQuic: false);
+                    SetBrowserDpiOptimizationPolicies(enableOptimization: false);
                 }
 
+                // Принудительно выгружаем ядерный драйвер WinDivert, чтобы он не оставался висеть между перезапусками
                 RunCommand("sc stop WinDivert");
                 RunCommand("sc stop WinDivert14");
+                RunCommand("ipconfig /flushdns");
             }
             catch { }
         }
@@ -549,7 +649,7 @@ namespace DnsSwitcherPro
         {
             if (config.EnableDpiBypass)
             {
-                StopDpiBypass(restoreQuic: true);
+                StopDpiBypass(restoreBrowserPolicies: true);
                 config.EnableDpiBypass = false;
                 SaveConfig();
                 UpdateDpiButtonVisualState();
@@ -573,7 +673,7 @@ namespace DnsSwitcherPro
             }
             else
             {
-                dpiBypassText.Text = "🛡️ Обход DPI: ОТКЛЮЧЕН (Нажмите для включения)";
+                dpiBypassText.Text = "🛡️ Обход DPI: ОТКЛЮЧЕН (ЛКМ — Вкл, ПКМ — Профиль)";
                 dpiBypassText.Foreground = BrushFromHex(textSubColorHex);
                 dpiBypassBtn.Background = BrushFromHex(bgCardHex);
                 dpiBypassBtn.BorderBrush = BrushFromHex(bgCardStrokeHex);
@@ -2414,12 +2514,12 @@ namespace DnsSwitcherPro
 
             var profiles = new (int id, string title, string desc)[]
             {
-                (1, "Профиль #1 — Disorder2 + YouTube/Discord (Проверенный)",
-                    "Та самая формула, на которой открывается Discord, дополненная чистым списком всех доменов и видеосерверов YouTube."),
-                (2, "Профиль #2 — Split2 + SeqOvl=1 (Для YouTube)",
-                    "Мягкое разделение TLS SNI с перекрытием 1 байта без badseq. Не сбрасывает соединения с серверами Google."),
-                (3, "Профиль #3 — Глобальный Disorder2 (Без списков)",
-                    "Применяет проверенную формулу Disorder2 вообще ко всем сайтам и кэш-серверам YouTube без фильтрации по спискам.")
+                (1, "Профиль #1 — Multidisorder (1,midsld) + Анти-Kyber",
+                    "Двойное разрезание TLS SNI для всех сайтов, YouTube и Discord + отключение раздутых пакетов Kyber при перезапуске браузера."),
+                (2, "Профиль #2 — Multisplit + SeqOvl=2 (Для YouTube)",
+                    "Разделение пакета с наложением 2 байт без badseq. Стабильно держит соединение после перезапуска браузера."),
+                (3, "Профиль #3 — Fake + Disorder2 (Fooling TS)",
+                    "Отправка маскировочных пакетов с временной меткой TS для жёстких ТСПУ провайдеров.")
             };
 
             foreach (var p in profiles)
@@ -2924,7 +3024,7 @@ namespace DnsSwitcherPro
             menu.Items.Add(new Forms.ToolStripSeparator());
             menu.Items.Add("Выход", null, (s, e) =>
             {
-                StopDpiBypass(restoreQuic: true);
+                StopDpiBypass(restoreBrowserPolicies: true);
                 trayIcon.Visible = false;
                 Environment.Exit(0);
             });
