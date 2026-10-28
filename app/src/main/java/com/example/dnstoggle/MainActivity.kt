@@ -49,9 +49,14 @@ import org.json.JSONObject
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.Inet4Address
+import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.URL
+import javax.net.ssl.HttpsURLConnection
 
 data class DnsServer(
     var name: String,
@@ -100,7 +105,7 @@ class ShieldDrawable(private var shieldColor: Int, private var isFilled: Boolean
     override fun draw(canvas: Canvas) {
         val width = bounds.width().toFloat()
         val height = bounds.height().toFloat()
-        
+
         val path = Path().apply {
             moveTo(width * 0.5f, height * 0.05f)
             lineTo(width * 0.9f, height * 0.2f)
@@ -139,6 +144,10 @@ class MainActivity : Activity() {
     private lateinit var topBar: LinearLayout
     private lateinit var settingsBtn: TextView
     private lateinit var listHeader: TextView
+
+    // Новые кнопки для Gemini (очистка кэша и проверка скрытия региона)
+    private lateinit var checkGeminiRegionBtn: TextView
+    private lateinit var clearGeminiCacheBtn: TextView
 
     // Элементы плашки возврата удаленного сервера (Undo)
     private lateinit var undoBanner: LinearLayout
@@ -227,7 +236,6 @@ class MainActivity : Activity() {
         registerSystemBackVibrate()
     }
 
-    // Регистрация перехватчика кнопки «Назад» для Android 13+ (API 33+)
     private fun registerSystemBackVibrate() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val callback = OnBackInvokedCallback {
@@ -263,7 +271,6 @@ class MainActivity : Activity() {
         checkNetworkAndTestAll()
     }
 
-    // Виброотклик при нажатии системной кнопки «Назад» на Android 12 и ниже
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         vibrateClick()
@@ -275,14 +282,12 @@ class MainActivity : Activity() {
         HapticUtil.vibrate(this, strong)
     }
 
-    // Надёжный перехват кнопки «Назад» и тапа мимо окна для всех диалогов (с сохранением фокуса для вибрации)
     private fun setupDialogBackHandling(dialog: AlertDialog, onNavigateBack: (() -> Unit)? = null) {
         var handledByKey = false
 
         dialog.setOnKeyListener { d, keyCode, event ->
             if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP && !event.isCanceled) {
                 handledByKey = true
-                // Вибрируем ДО закрытия диалога, пока окно гарантированно держит фокус
                 vibrateClick()
                 d.dismiss()
                 onNavigateBack?.invoke()
@@ -292,7 +297,6 @@ class MainActivity : Activity() {
             }
         }
 
-        // Если закрыли тапом мимо окна или системным свайпом, который обошел KeyEvent
         dialog.setOnCancelListener {
             if (!handledByKey) {
                 vibrateClick()
@@ -357,8 +361,13 @@ class MainActivity : Activity() {
         rootScroll.setBackgroundColor(Color.parseColor(bgRootHex))
         titleApp.setTextColor(Color.parseColor(accentColorHex))
         settingsBtn.background = createRoundRect(bgCardHex, 20f, bgCardStrokeHex)
+        settingsBtn.setTextColor(Color.parseColor(textMainColorHex))
         netStatusText.background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
         netStatusText.setTextColor(Color.parseColor(textSubColorHex))
+        checkGeminiRegionBtn.background = createRoundRect(accentCardBgHex, 22f, accentColorHex)
+        checkGeminiRegionBtn.setTextColor(Color.parseColor(accentColorHex))
+        clearGeminiCacheBtn.background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
+        clearGeminiCacheBtn.setTextColor(Color.parseColor(textMainColorHex))
         pingBtn.background = createRoundRect(accentCardBgHex, 20f, accentColorHex)
         pingBtn.setTextColor(Color.parseColor(accentColorHex))
         listHeader.setTextColor(Color.parseColor(textSubColorHex))
@@ -369,6 +378,30 @@ class MainActivity : Activity() {
 
     private fun hasPermission(): Boolean {
         return checkSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun isShizukuReady(): Boolean {
+        return try {
+            Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun runShizukuCommand(cmd: Array<String>): Boolean {
+        return try {
+            val method = Shizuku::class.java.getDeclaredMethod(
+                "newProcess",
+                Array<String>::class.java,
+                Array<String>::class.java,
+                String::class.java
+            )
+            method.isAccessible = true
+            val process = method.invoke(null, cmd, null, null) as Process
+            process.waitFor() == 0
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     private fun requestShizukuOneClick() {
@@ -389,30 +422,14 @@ class MainActivity : Activity() {
 
     private fun grantPermissionViaShizuku() {
         Thread {
-            try {
-                val method = Shizuku::class.java.getDeclaredMethod(
-                    "newProcess",
-                    Array<String>::class.java,
-                    Array<String>::class.java,
-                    String::class.java
-                )
-                method.isAccessible = true
-                val cmd = arrayOf("pm", "grant", packageName, android.Manifest.permission.WRITE_SECURE_SETTINGS)
-                val process = method.invoke(null, cmd, null, null) as Process
-                val exitCode = process.waitFor()
-
-                runOnUiThread {
-                    refreshSystemState()
-                    if (hasPermission()) {
-                        vibrateClick(true)
-                        Toast.makeText(this, "⚡ Права успешно выданы через Shizuku!", Toast.LENGTH_LONG).show()
-                    } else {
-                        Toast.makeText(this, "Не удалось выдать права (код: $exitCode)", Toast.LENGTH_LONG).show()
-                    }
-                }
-            } catch (e: Throwable) {
-                runOnUiThread {
-                    Toast.makeText(this, "Ошибка Shizuku: ${e.message}", Toast.LENGTH_LONG).show()
+            val ok = runShizukuCommand(arrayOf("pm", "grant", packageName, android.Manifest.permission.WRITE_SECURE_SETTINGS))
+            runOnUiThread {
+                refreshSystemState()
+                if (hasPermission() || ok) {
+                    vibrateClick(true)
+                    Toast.makeText(this, "⚡ Права успешно выданы через Shizuku!", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this, "Не удалось выдать права через Shizuku", Toast.LENGTH_LONG).show()
                 }
             }
         }.start()
@@ -447,9 +464,10 @@ class MainActivity : Activity() {
 
         settingsBtn = TextView(this).apply {
             text = "⚙️"
-            textSize = 22f
+            textSize = 20f
+            setTextColor(Color.parseColor(textMainColorHex))
             gravity = Gravity.CENTER
-            setPadding(20, 10, 20, 10)
+            setPadding(22, 10, 22, 10)
             background = createRoundRect(bgCardHex, 20f, bgCardStrokeHex)
             setOnClickListener {
                 vibrateClick()
@@ -497,7 +515,7 @@ class MainActivity : Activity() {
             setPadding(32, 28, 32, 28)
             background = createRoundRect(bgCardHex, 30f, bgCardStrokeHex)
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            params.setMargins(0, 0, 0, 24)
+            params.setMargins(0, 0, 0, 14)
             layoutParams = params
         }
 
@@ -558,6 +576,44 @@ class MainActivity : Activity() {
         }
         modeCard.addView(modeGroup)
         mainLayout.addView(modeCard)
+
+        // Кнопка 1: Проверка скрытия местоположения для Google Gemini
+        checkGeminiRegionBtn = TextView(this).apply {
+            text = "🕵️ Проверить защиту и регион Gemini"
+            textSize = 13f
+            setTextColor(Color.parseColor(accentColorHex))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(24, 22, 24, 22)
+            background = createRoundRect(accentCardBgHex, 22f, accentColorHex)
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            params.setMargins(0, 0, 0, 12)
+            layoutParams = params
+            setOnClickListener {
+                vibrateClick(true)
+                showGeminiRegionCheckDialog()
+            }
+        }
+        mainLayout.addView(checkGeminiRegionBtn)
+
+        // Кнопка 2: Очистка кэша для браузера и мобильного приложения Gemini
+        clearGeminiCacheBtn = TextView(this).apply {
+            text = "🧹 Очистить кэш Gemini и браузера (Сброс капчи)"
+            textSize = 13f
+            setTextColor(Color.parseColor(textMainColorHex))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(24, 22, 24, 22)
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            params.setMargins(0, 0, 0, 22)
+            layoutParams = params
+            setOnClickListener {
+                vibrateClick()
+                showClearGeminiCacheDialog()
+            }
+        }
+        mainLayout.addView(clearGeminiCacheBtn)
 
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -644,6 +700,522 @@ class MainActivity : Activity() {
 
         rootScroll.addView(mainLayout)
         setContentView(rootScroll)
+    }
+
+    // =========================================================================
+    // ФУНКЦИЯ 1: ДИАГНОСТИКА СКРЫТИЯ МЕСТОПОЛОЖЕНИЯ ДЛЯ GOOGLE GEMINI
+    // =========================================================================
+    private fun isDirectGoogleIp(ip: String): Boolean {
+        val directPrefixes = listOf(
+            "142.250.", "142.251.", "172.217.", "172.253.",
+            "216.58.", "74.125.", "173.194.", "108.177.",
+            "64.233.", "209.85.", "216.239."
+        )
+        return directPrefixes.any { ip.startsWith(it) }
+    }
+
+    private fun showGeminiRegionCheckDialog(returnToSettings: Boolean = false) {
+        var checkDialog: AlertDialog? = null
+
+        val rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(36, 28, 36, 28)
+            background = createRoundRect(if (isLightMode) "#FFFFFF" else "#0F1117", 36f, bgCardStrokeHex)
+        }
+
+        rootLayout.addView(createDialogHeaderTitle("🕵️ Защита и регион Gemini"))
+
+        val verdictCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(28, 22, 28, 22)
+            background = createRoundRect(bgCardHex, 24f, accentColorHex)
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            params.setMargins(0, 0, 0, 14)
+            layoutParams = params
+        }
+
+        val verdictTitle = TextView(this).apply {
+            text = "⏳ Выполняется проверка маршрутизации..."
+            textSize = 15f
+            setTextColor(Color.parseColor(accentColorHex))
+            typeface = Typeface.DEFAULT_BOLD
+        }
+
+        val verdictDetails = TextView(this).apply {
+            text = "Проверяем DNS-перехват gemini.google.com, наличие утечки IPv6 и статус капчи Google..."
+            textSize = 12.5f
+            setTextColor(Color.parseColor(textSubColorHex))
+            setPadding(0, 10, 0, 0)
+        }
+
+        verdictCard.addView(verdictTitle)
+        verdictCard.addView(verdictDetails)
+        rootLayout.addView(verdictCard)
+
+        val switchNextBtn = TextView(this).apply {
+            text = "🔄 Сменить DNS-сервер (Обойти капчу)"
+            textSize = 14f
+            setTextColor(Color.parseColor("#FFAB00"))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            background = createRoundRect("#261A00", 22f, "#FFAB00")
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            params.setMargins(0, 0, 0, 10)
+            layoutParams = params
+            setOnClickListener {
+                vibrateClick(true)
+                val activeHost = getActiveHost()
+                val working = serverList.filter { it.ping != -3 && !it.host.equals(activeHost, ignoreCase = true) }
+                val nextServer = if (working.isNotEmpty()) working[0] else serverList.firstOrNull { !it.host.equals(activeHost, ignoreCase = true) }
+                if (nextServer != null) {
+                    applyDnsMode("hostname", nextServer.host)
+                    Toast.makeText(this@MainActivity, "⚡ Переключено на: ${nextServer.name}", Toast.LENGTH_SHORT).show()
+                    checkDialog?.dismiss()
+                    showGeminiRegionCheckDialog(returnToSettings)
+                }
+            }
+        }
+        rootLayout.addView(switchNextBtn)
+
+        val retestBtn = TextView(this).apply {
+            text = "🔄 Проверить ещё раз"
+            textSize = 14f
+            setTextColor(Color.parseColor(accentColorHex))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect(accentCardBgHex, 22f, accentColorHex)
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            params.setMargins(0, 0, 0, 10)
+            layoutParams = params
+        }
+        rootLayout.addView(retestBtn)
+
+        val openCacheBtn = TextView(this).apply {
+            text = "🧹 Открыть меню очистки кэша Gemini"
+            textSize = 14f
+            setTextColor(Color.parseColor(textMainColorHex))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            params.setMargins(0, 0, 0, 10)
+            layoutParams = params
+            setOnClickListener {
+                vibrateClick()
+                checkDialog?.dismiss()
+                showClearGeminiCacheDialog(returnToSettings)
+            }
+        }
+        rootLayout.addView(openCacheBtn)
+
+        val closeBtn = TextView(this).apply {
+            text = if (returnToSettings) "Назад к настройкам" else "Закрыть"
+            textSize = 15f
+            setTextColor(Color.parseColor(textSubColorHex))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            layoutParams = params
+            setOnClickListener {
+                vibrateClick()
+                checkDialog?.dismiss()
+                if (returnToSettings) showSettingsDialog()
+            }
+        }
+        rootLayout.addView(closeBtn)
+
+        fun runDiagnostic() {
+            verdictTitle.text = "⏳ Выполняется проверка маршрутизации..."
+            verdictTitle.setTextColor(Color.parseColor(accentColorHex))
+            verdictCard.background = createRoundRect(bgCardHex, 24f, accentColorHex)
+            verdictDetails.text = "Опрашиваем DNS и сервер gemini.google.com..."
+            switchNextBtn.visibility = View.GONE
+
+            Thread {
+                val mode = getActiveMode()
+                val activeHost = getActiveHost()
+                val dnsLabel = if (mode == "hostname" && activeHost.isNotEmpty()) activeHost else "Выключен ($mode)"
+
+                var ipv4ProxyIp = ""
+                var hasIpv6Leak = false
+                var isInterceptedByProxy = false
+                var proxyCountry = "Неизвестно"
+                var proxyCountryCode = ""
+                var proxyOrg = ""
+                var httpStatus = -1
+                var isCaptchaDetected = false
+                var isRegionUnsupportedRedirect = false
+
+                try {
+                    val addresses = InetAddress.getAllByName("gemini.google.com")
+                    val ipv4List = addresses.filterIsInstance<Inet4Address>().map { it.hostAddress ?: "" }
+                    val ipv6List = addresses.filterIsInstance<Inet6Address>().map { it.hostAddress ?: "" }
+
+                    if (ipv4List.isNotEmpty()) {
+                        ipv4ProxyIp = ipv4List[0]
+                        isInterceptedByProxy = !isDirectGoogleIp(ipv4ProxyIp)
+                    }
+
+                    // Если возвращаются стандартные IPv6 адреса Google (2a00:1450:*) при включенном мобильном IPv6 — возможна утечка региона
+                    if (ipv6List.any { it.startsWith("2a00:1450:") || it.startsWith("2607:f8b0:") }) {
+                        hasIpv6Leak = true
+                    }
+
+                    // Проверяем геолокацию IP, через который идет запрос к Gemini
+                    if (ipv4ProxyIp.isNotEmpty()) {
+                        try {
+                            val geoUrl = URL("http://ip-api.com/json/$ipv4ProxyIp?fields=status,country,countryCode,org,isp&lang=ru")
+                            val conn = (geoUrl.openConnection() as HttpURLConnection).apply {
+                                connectTimeout = 3000
+                                readTimeout = 3000
+                            }
+                            if (conn.responseCode == 200) {
+                                val text = conn.inputStream.bufferedReader().use { it.readText() }
+                                val json = JSONObject(text)
+                                if (json.optString("status") == "success") {
+                                    proxyCountry = json.optString("country", "Неизвестно")
+                                    proxyCountryCode = json.optString("countryCode", "")
+                                    proxyOrg = json.optString("org", json.optString("isp", ""))
+                                }
+                            }
+                            conn.disconnect()
+                        } catch (_: Exception) {}
+                    }
+
+                    // Прямая проверка ответа https://gemini.google.com/app
+                    try {
+                        val geminiUrl = URL("https://gemini.google.com/app")
+                        val httpsConn = (geminiUrl.openConnection() as HttpsURLConnection).apply {
+                            instanceFollowRedirects = false
+                            connectTimeout = 4500
+                            readTimeout = 4500
+                            setRequestProperty(
+                                "User-Agent",
+                                "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                            )
+                        }
+                        httpStatus = httpsConn.responseCode
+                        val locationHeader = httpsConn.getHeaderField("Location") ?: ""
+
+                        if (httpStatus == 429 || httpStatus == 503 || locationHeader.contains("/sorry/", ignoreCase = true) || locationHeader.contains("ipv4.google.com/sorry", ignoreCase = true)) {
+                            isCaptchaDetected = true
+                        } else if (locationHeader.contains("faq", ignoreCase = true) || locationHeader.contains("unsupported", ignoreCase = true)) {
+                            isRegionUnsupportedRedirect = true
+                        }
+                        httpsConn.disconnect()
+                    } catch (_: Exception) {}
+
+                } catch (_: Exception) {}
+
+                runOnUiThread {
+                    val report = StringBuilder()
+                    report.append("• Системный Private DNS: $dnsLabel\n")
+                    report.append("• IP для gemini.google.com: ${if (ipv4ProxyIp.isEmpty()) "Нет ответа ❌" else ipv4ProxyIp}\n")
+                    if (proxyCountryCode.isNotEmpty()) {
+                        report.append("• Видимая страна для Gemini: $proxyCountry ($proxyCountryCode)\n")
+                    }
+                    if (proxyOrg.isNotEmpty()) {
+                        report.append("• Узел маршрутизации: $proxyOrg\n")
+                    }
+                    report.append("• Защита от утечки по IPv6: ${if (hasIpv6Leak) "⚠️ Есть риск утечки (Google IPv6)" else "✅ Защищено (Только IPv4 прокси)"}\n")
+
+                    when {
+                        mode != "hostname" -> {
+                            vibrateClick(true)
+                            verdictTitle.text = "❌ Реальное местоположение НЕ скрыто!"
+                            verdictTitle.setTextColor(Color.parseColor("#FF5252"))
+                            verdictCard.background = createRoundRect(if (isLightMode) "#FFEBEE" else "#1F1214", 24f, "#FF5252")
+                            report.append("\nПричина: Системный режим Private DNS отключен или стоит в режиме «Авто». Включите режим «Вкл» и выберите сервер (например, Comss.one или Malw.link).")
+                        }
+                        ipv4ProxyIp.isEmpty() -> {
+                            vibrateClick(true)
+                            verdictTitle.text = "⚠️ Ошибка соединения с DNS-сервером"
+                            verdictTitle.setTextColor(Color.parseColor("#FF5252"))
+                            verdictCard.background = createRoundRect(if (isLightMode) "#FFEBEE" else "#1F1214", 24f, "#FF5252")
+                            report.append("\nНе удалось получить адрес gemini.google.com. Выберите другой рабочий сервер из списка.")
+                            switchNextBtn.visibility = View.VISIBLE
+                        }
+                        !isInterceptedByProxy || proxyCountryCode.equals("RU", true) || proxyCountryCode.equals("BY", true) || isRegionUnsupportedRedirect -> {
+                            vibrateClick(true)
+                            verdictTitle.text = "❌ Местоположение НЕ скрыто от Gemini!"
+                            verdictTitle.setTextColor(Color.parseColor("#FF5252"))
+                            verdictCard.background = createRoundRect(if (isLightMode) "#FFEBEE" else "#1F1214", 24f, "#FF5252")
+                            report.append("\nПричина: Текущий DNS ($activeHost) направляет запросы напрямую в Google без маскировки региона. Переключитесь на Comss.one, Malw.link или GeoHide!")
+                            switchNextBtn.visibility = View.VISIBLE
+                        }
+                        isCaptchaDetected -> {
+                            vibrateClick(true)
+                            verdictTitle.text = "⚠️ Местоположение скрыто, но IP перегружен (Капча)"
+                            verdictTitle.setTextColor(Color.parseColor("#FFAB00"))
+                            verdictCard.background = createRoundRect("#261A00", 24f, "#FFAB00")
+                            report.append("\nВаше реальное местоположение успешно скрыто ($proxyCountry), но Google временно выдал капчу «Подозрительный трафик» на IP $ipv4ProxyIp.\n\nРешение: Нажмите кнопку «Сменить DNS-сервер» ниже и очистите кэш браузера!")
+                            switchNextBtn.visibility = View.VISIBLE
+                        }
+                        hasIpv6Leak -> {
+                            vibrateClick(true)
+                            verdictTitle.text = "⚠️ IPv4 скрыт ($proxyCountry), но есть утечка IPv6!"
+                            verdictTitle.setTextColor(Color.parseColor("#FFAB00"))
+                            verdictCard.background = createRoundRect("#261A00", 24f, "#FFAB00")
+                            report.append("\nDNS-сервер подменяет IPv4, но пропускает прямой IPv6-адрес Google. Если Gemini пишет о недоступности региона — переключитесь на другой DNS-сервер и сбросьте кэш приложения Google.")
+                            switchNextBtn.visibility = View.VISIBLE
+                        }
+                        else -> {
+                            vibrateClick()
+                            verdictTitle.text = "✅ Местоположение успешно скрыто!"
+                            verdictTitle.setTextColor(Color.parseColor(accentColorHex))
+                            verdictCard.background = createRoundRect(accentCardBgHex, 24f, accentColorHex)
+                            report.append("\nОтлично! Google Gemini видит ваше подключение из региона «$proxyCountry ($proxyCountryCode)». Региональных блокировок и капчи не обнаружено.")
+                        }
+                    }
+
+                    verdictDetails.text = report.toString()
+                }
+            }.start()
+        }
+
+        retestBtn.setOnClickListener {
+            vibrateClick()
+            runDiagnostic()
+        }
+
+        checkDialog = AlertDialog.Builder(this)
+            .setView(rootLayout)
+            .create()
+
+        checkDialog?.let {
+            setupDialogBackHandling(it) {
+                if (returnToSettings) showSettingsDialog()
+            }
+        }
+        checkDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        checkDialog?.show()
+
+        runDiagnostic()
+    }
+
+    // =========================================================================
+    // ФУНКЦИЯ 2: ОЧИСТКА КЭША ДЛЯ МОБИЛЬНОГО ПРИЛОЖЕНИЯ GEMINI И БРАУЗЕРОВ
+    // =========================================================================
+    private fun openAppStorageSettings(pkgName: String, appTitle: String) {
+        try {
+            // Если Shizuku активен — предварительно останавливаем процесс приложения, чтобы сбросить активную сессию в ОЗУ
+            if (isShizukuReady()) {
+                Thread {
+                    runShizukuCommand(arrayOf("am", "force-stop", pkgName))
+                }.start()
+            }
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.fromParts("package", pkgName, null)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+            Toast.makeText(
+                this,
+                "Нажмите «Память (Хранилище)» → «Очистить кэш» для $appTitle",
+                Toast.LENGTH_LONG
+            ).show()
+        } catch (_: Exception) {
+            Toast.makeText(this, "Приложение «$appTitle» не установлено на телефоне", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun flushAndroidDnsAndStopGeminiApps() {
+        Thread {
+            val currentMode = getActiveMode()
+            val currentHost = getActiveHost()
+
+            // 1. Принудительный сброс системного DNS-кэша Android путём кратковременного переключения Private DNS
+            if (hasPermission() && currentMode == "hostname" && currentHost.isNotEmpty()) {
+                try {
+                    Settings.Global.putString(contentResolver, "private_dns_mode", "off")
+                    Thread.sleep(350)
+                    Settings.Global.putString(contentResolver, "private_dns_mode", "hostname")
+                    Settings.Global.putString(contentResolver, "private_dns_specifier", currentHost)
+                } catch (_: Exception) {}
+            }
+
+            // 2. Если активен Shizuku — принудительно останавливаем фоновые процессы Gemini, приложения Google и браузеров
+            var stoppedViaShizuku = false
+            if (isShizukuReady()) {
+                val targetPackages = listOf(
+                    "com.google.android.apps.bard",
+                    "com.google.android.googlequicksearchbox",
+                    "com.sec.android.app.sbrowser",
+                    "com.android.chrome",
+                    "com.yandex.browser",
+                    "com.brave.browser"
+                )
+                for (pkg in targetPackages) {
+                    runShizukuCommand(arrayOf("am", "force-stop", pkg))
+                }
+                stoppedViaShizuku = true
+            }
+
+            runOnUiThread {
+                vibrateClick(true)
+                refreshSystemState()
+                val msg = if (stoppedViaShizuku) {
+                    "⚡ DNS-кэш сброшен, фоновые сессии Gemini и браузеров перезапущены через Shizuku!"
+                } else {
+                    "✅ Системный DNS-кэш и старые соединения успешно сброшены!"
+                }
+                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+            }
+        }.start()
+    }
+
+    private fun showClearGeminiCacheDialog(returnToSettings: Boolean = false) {
+        var cacheDialog: AlertDialog? = null
+
+        val rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(36, 28, 36, 28)
+            background = createRoundRect(if (isLightMode) "#FFFFFF" else "#0F1117", 36f, bgCardStrokeHex)
+        }
+
+        rootLayout.addView(createDialogHeaderTitle("🧹 Очистка кэша Gemini и браузера"))
+
+        val hintBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
+            setPadding(24, 18, 24, 18)
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            params.setMargins(0, 0, 0, 14)
+            layoutParams = params
+        }
+
+        val hintTv = TextView(this).apply {
+            text = "💡 На Android приложение Gemini хранит метку вашего региона внутри главного приложения «Google», а при входе через браузер — в кэше и куки браузера."
+            textSize = 12f
+            setTextColor(Color.parseColor(textSubColorHex))
+        }
+        hintBox.addView(hintTv)
+        rootLayout.addView(hintBox)
+
+        // Кнопка мгновенного сброса сессии и DNS-кэша в 1 клик
+        val quickFlushBtn = TextView(this).apply {
+            text = "⚡ Сбросить DNS-кэш и фоновые сессии (1 клик)"
+            textSize = 13.5f
+            setTextColor(Color.parseColor(accentColorHex))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(20, 0, 20, 0)
+            background = createRoundRect(accentCardBgHex, 22f, accentColorHex)
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            params.setMargins(0, 0, 0, 14)
+            layoutParams = params
+            setOnClickListener {
+                flushAndroidDnsAndStopGeminiApps()
+            }
+        }
+        rootLayout.addView(quickFlushBtn)
+
+        val scrollView = ScrollView(this).apply {
+            val maxHeight = (resources.displayMetrics.heightPixels * 0.42).toInt()
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxHeight)
+        }
+
+        val appListBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
+            setPadding(16, 8, 16, 8)
+        }
+
+        val targetApps = listOf(
+            Triple("✨ Приложение Google Gemini", "Очистить кэш мобильного клиента Gemini", "com.google.android.apps.bard"),
+            Triple("🔍 Приложение Google (Обязательно!)", "Хранит регион аккаунта для приложения Gemini", "com.google.android.googlequicksearchbox"),
+            Triple("🌐 Samsung Internet", "Очистить кэш и куки gemini.google.com", "com.sec.android.app.sbrowser"),
+            Triple("🌐 Google Chrome", "Очистить кэш и данные сайта в Chrome", "com.android.chrome"),
+            Triple("🌐 Яндекс Браузер", "Очистить кэш и сессию в Яндекс Браузере", "com.yandex.browser"),
+            Triple("🌐 Brave / Opera / Firefox", "Открыть хранилище дополнительного браузера", "com.brave.browser")
+        )
+
+        for ((index, appItem) in targetApps.withIndex()) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(20, 20, 20, 20)
+                setOnClickListener {
+                    vibrateClick()
+                    if (index == 5) {
+                        // Проверяем альтернативные браузеры по очереди
+                        val altPackages = listOf("com.brave.browser", "com.opera.browser", "org.mozilla.firefox", "com.microsoft.emmx")
+                        var opened = false
+                        for (altPkg in altPackages) {
+                            try {
+                                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                    data = Uri.fromParts("package", altPkg, null)
+                                }
+                                startActivity(intent)
+                                opened = true
+                                break
+                            } catch (_: Exception) {}
+                        }
+                        if (!opened) {
+                            Toast.makeText(this@MainActivity, "Дополнительные браузеры не найдены", Toast.LENGTH_SHORT).show()
+                        }
+                    } else {
+                        openAppStorageSettings(appItem.third, appItem.first)
+                    }
+                }
+            }
+
+            val titleTv = TextView(this).apply {
+                text = appItem.first
+                textSize = 14.5f
+                setTextColor(Color.parseColor(textMainColorHex))
+                typeface = Typeface.DEFAULT_BOLD
+            }
+
+            val subTv = TextView(this).apply {
+                text = "${appItem.second} → Нажмите «Хранилище» → «Очистить кэш»"
+                textSize = 11.5f
+                setTextColor(Color.parseColor(textSubColorHex))
+                setPadding(0, 4, 0, 0)
+            }
+
+            row.addView(titleTv)
+            row.addView(subTv)
+            appListBox.addView(row)
+
+            if (index < targetApps.size - 1) {
+                appListBox.addView(createHorizontalDivider())
+            }
+        }
+
+        scrollView.addView(appListBox)
+        rootLayout.addView(scrollView)
+
+        val closeBtn = TextView(this).apply {
+            text = if (returnToSettings) "Назад к настройкам" else "Закрыть"
+            textSize = 15f
+            setTextColor(Color.parseColor(textSubColorHex))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundRect(bgCardHex, 22f, bgCardStrokeHex)
+            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 105)
+            params.setMargins(0, 14, 0, 0)
+            layoutParams = params
+            setOnClickListener {
+                vibrateClick()
+                cacheDialog?.dismiss()
+                if (returnToSettings) showSettingsDialog()
+            }
+        }
+        rootLayout.addView(closeBtn)
+
+        cacheDialog = AlertDialog.Builder(this)
+            .setView(rootLayout)
+            .create()
+
+        cacheDialog?.let {
+            setupDialogBackHandling(it) {
+                if (returnToSettings) showSettingsDialog()
+            }
+        }
+        cacheDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        cacheDialog?.show()
     }
 
     private fun verifyActiveDnsInternet() {
@@ -917,6 +1489,11 @@ class MainActivity : Activity() {
 
         rootLayout.addView(createDialogHeaderTitle("⚙️ Настройки приложения"))
 
+        val scrollView = ScrollView(this).apply {
+            val maxHeight = (resources.displayMetrics.heightPixels * 0.62).toInt()
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxHeight)
+        }
+
         val optionsContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
@@ -925,6 +1502,8 @@ class MainActivity : Activity() {
             Pair("➕ Добавить свой сервер", "Ручной ввод хоста и имени"),
             Pair("📚 Популярные DNS-серверы", "Каталог проверенных серверов"),
             Pair("📊 Ping Benchmark (Топ серверов)", "Анализ скорости и автовыбор лидера"),
+            Pair("🕵️ Проверить защиту и регион Gemini", "Тест скрытия местоположения, IPv6 и капчи"),
+            Pair("🧹 Очистить кэш Gemini и браузеров", "Сброс сессии, куки и региональной метки"),
             Pair("💾 Бэкап и сброс настроек", "Экспорт/импорт JSON, сброс списка"),
             Pair("✨ Кастомизация", "Тема, светлый/темный режим и стиль")
         )
@@ -946,8 +1525,10 @@ class MainActivity : Activity() {
                         0 -> showEditServerDialog(null, returnToSettings = true)
                         1 -> showPresetsDialog()
                         2 -> showBenchmarkDialog()
-                        3 -> showBackupDialog()
-                        4 -> showCustomizationDialog()
+                        3 -> showGeminiRegionCheckDialog(returnToSettings = true)
+                        4 -> showClearGeminiCacheDialog(returnToSettings = true)
+                        5 -> showBackupDialog()
+                        6 -> showCustomizationDialog()
                     }
                 }
             }
@@ -971,7 +1552,8 @@ class MainActivity : Activity() {
             optionsContainer.addView(card)
         }
 
-        rootLayout.addView(optionsContainer)
+        scrollView.addView(optionsContainer)
+        rootLayout.addView(scrollView)
 
         val closeBtn = TextView(this).apply {
             text = "Закрыть"
@@ -1064,7 +1646,7 @@ class MainActivity : Activity() {
                                     renderServerList()
                                 }
                                 renderCustomizationOptions()
-                                val msg = if (newSort) "Автосортировка включена 🔀" else "Порядок серверов зафиксирован 📌"
+                                val msg = if (newSort) "Автосортировка включена" else "Порядок серверов зафиксирован"
                                 Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
                             }
                             3 -> {
@@ -1077,7 +1659,7 @@ class MainActivity : Activity() {
                                 prefs.edit().putBoolean("haptic_enabled", newState).apply()
                                 if (newState) HapticUtil.vibrate(this@MainActivity, true)
                                 renderCustomizationOptions()
-                                val msg = if (newState) "Виброотклик включен 📳" else "Виброотклик отключен 🔇"
+                                val msg = if (newState) "Виброотклик включен" else "Виброотклик отключен"
                                 Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
                             }
                         }
@@ -1183,7 +1765,7 @@ class MainActivity : Activity() {
                         0 -> "🥇 #1"
                         1 -> "🥈 #2"
                         2 -> "🥉 #3"
-                        else -> "    #${index + 1}"
+                        else -> "   #${index + 1}"
                     }
 
                     val itemLayout = LinearLayout(this).apply {
@@ -1210,7 +1792,7 @@ class MainActivity : Activity() {
                         textSize = 14f
                         setTextColor(Color.parseColor(accentColorHex))
                         typeface = Typeface.DEFAULT_BOLD
-                        val params = LinearLayout.LayoutParams(80, ViewGroup.LayoutParams.WRAP_CONTENT)
+                        val params = LinearLayout.LayoutParams(95, ViewGroup.LayoutParams.WRAP_CONTENT)
                         layoutParams = params
                     }
 
@@ -1610,13 +2192,12 @@ class MainActivity : Activity() {
                 }
             }
 
-            // Векторный контур щита
             val shieldView = View(this).apply {
                 val sizeInPx = (24 * resources.displayMetrics.density).toInt()
                 val params = LinearLayout.LayoutParams(sizeInPx, sizeInPx)
                 params.setMargins(0, 0, 16, 0)
                 layoutParams = params
-                
+
                 val shieldColor = if (isSelected) Color.parseColor(accentColorHex) else Color.parseColor(textSubColorHex)
                 background = ShieldDrawable(shieldColor, isFilled = isSelected)
             }
@@ -1812,7 +2393,7 @@ class MainActivity : Activity() {
         }
 
         val noteTv = TextView(this).apply {
-            text = "💡 Префиксы https:// или tls:// очищаются автоматически."
+            text = "ℹ️ Префиксы https:// или tls:// очищаются автоматически."
             textSize = 12f
             setTextColor(Color.parseColor(textSubColorHex))
             setPadding(8, 4, 8, 20)
@@ -2223,7 +2804,7 @@ class MainActivity : Activity() {
             background = createRoundRect(if (isLightMode) "#FFFFFF" else "#0F1117", 36f, bgCardStrokeHex)
         }
 
-        rootLayout.addView(createDialogHeaderTitle("🔑 Системное разрешение"))
+        rootLayout.addView(createDialogHeaderTitle("🔐 Системное разрешение"))
 
         val infoBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2435,7 +3016,7 @@ class MainActivity : Activity() {
         }
 
         val githubBtn = TextView(this).apply {
-            text = "🌐 GitHub (APK)"
+            text = "📦 GitHub (APK)"
             textSize = 13f
             setTextColor(Color.parseColor("#00B0FF"))
             typeface = Typeface.DEFAULT_BOLD
