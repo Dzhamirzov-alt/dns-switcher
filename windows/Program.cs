@@ -278,7 +278,6 @@ namespace DnsSwitcherPro
             };
         }
 
-        // Контроль живучести winws.exe: если процесс упал в фоне при включённом тумблере — перезапускаем автоматически
         private void EnsureDpiProcessAlive()
         {
             if (!config.EnableDpiBypass || isStartingDpi) return;
@@ -301,7 +300,123 @@ namespace DnsSwitcherPro
             return null;
         }
 
-        private string BuildCombinedHostlistFile(string dpiDir)
+        // Формируем список исключений (list-exclude-gemini-dns.txt) без BOM:
+        // Zapret НИКОГДА не будет трогать трафик к прокси-серверам DNS, сайту Gemini и другим ИИ-сервисам
+        private string BuildExcludeHostlistFile(string dpiDir)
+        {
+            var excludeDomains = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                // Домены Google Gemini, AI Studio и авторизации Google
+                "gemini.google.com",
+                "www.gemini.google.com",
+                "aistudio.google.com",
+                "makersuite.google.com",
+                "alkalimakersuite-pa.clients6.google.com",
+                "generativelanguage.googleapis.com",
+                "proactivebackend-pa.googleapis.com",
+                "notebooklm.google.com",
+                "bard.google.com",
+                "deepmind.google",
+                "labs.google",
+                "accounts.google.com",
+                "ogs.google.com",
+                "apis.google.com",
+                "clients6.google.com",
+                "gstatic.com",
+                "www.gstatic.com",
+                "ssl.gstatic.com",
+
+                // Зарубежные ИИ и сервисы, работающие через умный DNS (Comss / Malw / GeoHide / Xbox)
+                "chatgpt.com",
+                "openai.com",
+                "auth.openai.com",
+                "oaistatic.com",
+                "oaiusercontent.com",
+                "claude.ai",
+                "anthropic.com",
+                "copilot.microsoft.com",
+                "sydney.bing.com",
+                "bing.com",
+                "edgeservices.bing.com",
+                "githubcopilot.com",
+                "grok.com",
+                "x.ai",
+                "perplexity.ai",
+                "elevenlabs.io",
+                "midjourney.com",
+                "spotify.com",
+                "scdn.co",
+                "xboxlive.com",
+                "xbox.com",
+                "microsoft.com",
+                "live.com",
+
+                // Домены всех DNS-серверов (чтобы Zapret не ломал DoH-запросы на порту 443)
+                "dns.comss.one",
+                "comss.one",
+                "comss.dns.controld.com",
+                "controld.com",
+                "freedns.controld.com",
+                "dns.malw.link",
+                "malw.link",
+                "geohide.ru",
+                "dns.astracat.network",
+                "astracat.network",
+                "xbox-dns.ru",
+                "dns.quad9.net",
+                "quad9.net",
+                "dns.adguard-dns.com",
+                "family.adguard-dns.com",
+                "adguard-dns.com",
+                "one.one.one.one",
+                "cloudflare-dns.com",
+                "security.cloudflare-dns.com",
+                "dns.google",
+                "dns.mullvad.net",
+                "mullvad.net",
+                "cleanbrowsing.org",
+                "security-filter-dns.cleanbrowsing.org"
+            };
+
+            // Добавляем все пользовательские DNS-хосты из текущего списка серверов
+            foreach (var s in serverList)
+            {
+                if (!string.IsNullOrWhiteSpace(s.host))
+                {
+                    excludeDomains.Add(s.host.Trim());
+                }
+            }
+
+            // Подгружаем также стандартный список исключений из сборки Flowseal, если он есть
+            string? flowsealExclude = FindDpiAsset(dpiDir, "list-exclude.txt");
+            if (flowsealExclude != null && File.Exists(flowsealExclude))
+            {
+                try
+                {
+                    foreach (var rawLine in File.ReadAllLines(flowsealExclude, Encoding.UTF8))
+                    {
+                        string line = rawLine.Trim().TrimStart('\uFEFF');
+                        if (!string.IsNullOrEmpty(line) && !line.StartsWith("#"))
+                        {
+                            excludeDomains.Add(line);
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            string excludePath = Path.Combine(dpiDir, "list-exclude-gemini-dns.txt");
+            try
+            {
+                File.WriteAllLines(excludePath, excludeDomains, Utf8NoBom);
+            }
+            catch { }
+
+            return excludePath;
+        }
+
+        // Формируем целевой список ТОЛЬКО для YouTube, Discord и заблокированных сайтов (без доменов Gemini и без DNS-серверов)
+        private string BuildCombinedHostlistFile(string dpiDir, HashSet<string> excludedSet)
         {
             var domains = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
@@ -316,16 +431,12 @@ namespace DnsSwitcherPro
                 "s.ytimg.com",
                 "ggpht.com",
                 "yt3.ggpht.com",
-                "googleusercontent.com",
-                "lh3.googleusercontent.com",
+                "yt4.ggpht.com",
                 "youtubei.googleapis.com",
                 "youtubeembeddedplayer.googleapis.com",
                 "ytimg.l.google.com",
                 "jnn-pa.googleapis.com",
                 "wide-youtube.l.google.com",
-                "play.google.com",
-                "gstatic.com",
-                "googleapis.com",
                 "nhacmp3youtube.com",
                 "discord.com",
                 "www.discord.com",
@@ -350,7 +461,7 @@ namespace DnsSwitcherPro
                         foreach (var rawLine in File.ReadAllLines(path, Encoding.UTF8))
                         {
                             string line = rawLine.Trim().TrimStart('\uFEFF');
-                            if (!string.IsNullOrEmpty(line) && !line.StartsWith("#"))
+                            if (!string.IsNullOrEmpty(line) && !line.StartsWith("#") && !excludedSet.Contains(line))
                             {
                                 domains.Add(line);
                             }
@@ -359,6 +470,9 @@ namespace DnsSwitcherPro
                     catch { }
                 }
             }
+
+            // Удаляем любые пересечения со списком исключений
+            domains.ExceptWith(excludedSet);
 
             string combinedPath = Path.Combine(dpiDir, "list-combined.txt");
             try
@@ -370,8 +484,6 @@ namespace DnsSwitcherPro
             return combinedPath;
         }
 
-        // 1. Отключаем QUIC (UDP 443) и Post-Quantum Kyber/ML-KEM в браузерах через системные политики,
-        // чтобы после перезапуска браузера пакет TLS ClientHello не раздувался на 2 сегмента и не ломал обход DPI
         private void SetBrowserDpiOptimizationPolicies(bool enableOptimization)
         {
             foreach (var b in GetInstalledBrowsersTargetList())
@@ -395,14 +507,12 @@ namespace DnsSwitcherPro
                 catch { }
             }
 
-            // Дополнительно очищаем кэш заблокированных QUIC/Alt-Svc сессий в профилях браузеров
             if (enableOptimization)
             {
                 ClearBrowserBrokenQuicState();
             }
         }
 
-        // Очистка файла Network Persistent State (чтобы после перезапуска браузер не цеплялся к мёртвым QUIC/IP сессиям YouTube и Discord)
         private void ClearBrowserBrokenQuicState()
         {
             try
@@ -431,59 +541,63 @@ namespace DnsSwitcherPro
             catch { }
         }
 
-        // Полный сброс сокетов, DNS-кэша и TCP-параметров перед запуском Zapret
         private void FlushSystemNetworkSockets()
         {
             RunCommand("ipconfig /flushdns");
             RunCommand("arp -d *");
-            // Включаем ECN и нормализацию временных меток TCP для стабильного прохождения ТСПУ
             RunCommand("netsh int tcp set global timestamps=enabled");
         }
 
-        // Обновлённый блок стратегий Zapret:
-        // Использует глобальный перехват TCP 80,443 без зависимости от того, совпал ли поддомен кеш-сервера YouTube со списком,
-        // а также обрабатывает TLS Session Ticket при повторных открытиях браузера
+        // Формирование аргументов Zapret со строгим исключением доменов Gemini и всех DNS-серверов (--hostlist-exclude)
         private string BuildZapretArguments(string dpiDir)
         {
             string? quicBin = FindDpiAsset(dpiDir, "quic_initial_www_google_com.bin");
             string? tlsBin = FindDpiAsset(dpiDir, "tls_clienthello_www_google_com.bin");
-            string combinedList = BuildCombinedHostlistFile(dpiDir);
 
-            string udpQuicPart = quicBin != null
-                ? $"--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic=\"{quicBin}\" --new "
-                : "--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --new ";
+            string excludeListPath = BuildExcludeHostlistFile(dpiDir);
+            var excludedSet = new HashSet<string>(
+                File.Exists(excludeListPath) ? File.ReadAllLines(excludeListPath, Encoding.UTF8) : Array.Empty<string>(),
+                StringComparer.OrdinalIgnoreCase);
+
+            string combinedListPath = BuildCombinedHostlistFile(dpiDir, excludedSet);
+
+            string hostListArg = File.Exists(combinedListPath) ? $" --hostlist=\"{combinedListPath}\"" : "";
+            string excludeArg = File.Exists(excludeListPath) ? $" --hostlist-exclude=\"{excludeListPath}\"" : "";
 
             string discordVoicePart =
                 "--filter-udp=50000-50099 --filter-l7=discord,stun --dpi-desync=fake --dpi-desync-repeats=6 --new ";
+
+            string udpQuicPart = quicBin != null
+                ? $"--filter-udp=443{hostListArg}{excludeArg} --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic=\"{quicBin}\" --new "
+                : $"--filter-udp=443{hostListArg}{excludeArg} --dpi-desync=fake --dpi-desync-repeats=6 --new ";
 
             int profile = config.DpiStrategyProfile;
 
             if (profile == 2)
             {
-                // Профиль #2: Multisplit + SeqOvl=2 (разрезает и первый байт, и середину домена midsld — не боится повторных сессий браузера)
+                // Профиль #2: Multisplit + SeqOvl=2 по целевому списку YouTube/Discord с исключением Gemini/DNS
                 string patternArg = tlsBin != null ? $" --dpi-desync-split-seqovl-pattern=\"{tlsBin}\"" : "";
                 return $"--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443,50000-50099 " +
                        $"{discordVoicePart}" +
                        $"{udpQuicPart}" +
-                       $"--filter-tcp=80,443 --dpi-desync=multisplit --dpi-desync-split-pos=1,midsld --dpi-desync-split-seqovl=2{patternArg}";
+                       $"--filter-tcp=80,443{hostListArg}{excludeArg} --dpi-desync=multisplit --dpi-desync-split-pos=1,midsld --dpi-desync-split-seqovl=2{patternArg}";
             }
             else if (profile == 3)
             {
-                // Профиль #3: Fake + Disorder2 с обманом по временным меткам (ts) и поддержкой длинных TLS-пакетов после перезапуска
-                string fakeTlsArg = tlsBin != null ? $" --dpi-desync-fake-tls=\"{tlsBin}\"" : "";
+                // Профиль #3: Глобальный Multidisorder (1,midsld) для всех сайтов и кэш-серверов, НО со строгим исключением Gemini, ИИ и DNS-серверов!
                 return $"--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443,50000-50099 " +
                        $"{discordVoicePart}" +
                        $"{udpQuicPart}" +
-                       $"--filter-tcp=80,443 --dpi-desync=fake,disorder2 --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts{fakeTlsArg}";
+                       $"--filter-tcp=80,443{excludeArg} --dpi-desync=multidisorder --dpi-desync-split-pos=1,midsld";
             }
             else
             {
-                // Профиль #1 (Основной универсальный):
-                // Двойная десинхронизация multidisorder по точкам (1,midsld) на всех портах 80,443 без привязки к хостлисту (чтобы не слетали региональные серверы YouTube и Discord gateway)
+                // Профиль #1 (Рекомендуемый):
+                // Двойное разрезание multidisorder (1,midsld) строго по списку YouTube и Discord + полная защита трафика Gemini и DNS-прокси
                 return $"--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443,50000-50099 " +
                        $"{discordVoicePart}" +
                        $"{udpQuicPart}" +
-                       "--filter-tcp=80,443 --dpi-desync=multidisorder --dpi-desync-split-pos=1,midsld";
+                       $"--filter-tcp=80,443{hostListArg}{excludeArg} --dpi-desync=multidisorder --dpi-desync-split-pos=1,midsld";
             }
         }
 
@@ -491,9 +605,9 @@ namespace DnsSwitcherPro
         {
             return config.DpiStrategyProfile switch
             {
-                2 => "Профиль #2 (Multisplit + SeqOvl)",
-                3 => "Профиль #3 (Fake + Disorder2 TS)",
-                _ => "Профиль #1 (Multidisorder 1,midsld)"
+                2 => "Профиль #2 (Multisplit + Исключения)",
+                3 => "Профиль #3 (Глобальный + Исключения Gemini)",
+                _ => "Профиль #1 (YouTube/Discord + Защита Gemini)"
             };
         }
 
@@ -526,13 +640,9 @@ namespace DnsSwitcherPro
                     return false;
                 }
 
-                // 1. Применяем анти-Kyber и анти-QUIC политики для браузеров + чистим залипшие сессии
                 SetBrowserDpiOptimizationPolicies(enableOptimization: true);
-
-                // 2. Сбрасываем системный кэш сокетов и DNS
                 FlushSystemNetworkSockets();
 
-                // 3. Запускаем winws.exe с выбранным профилем
                 string args = BuildZapretArguments(dpiDir);
                 var psi = new ProcessStartInfo(winwsPath, args)
                 {
@@ -545,14 +655,17 @@ namespace DnsSwitcherPro
                 dpiProcess = Process.Start(psi);
                 Task.Delay(350).Wait();
 
-                // Если версия winws.exe не поддерживает ключевое слово midsld — автоматически откатываемся на классический split-pos=1
+                // Если версия winws.exe не поддерживает midsld — запускаем классический disorder2 со списком исключений Gemini/DNS
                 if (dpiProcess == null || dpiProcess.HasExited)
                 {
+                    string excludeListPath = BuildExcludeHostlistFile(dpiDir);
+                    string excludeArg = File.Exists(excludeListPath) ? $" --hostlist-exclude=\"{excludeListPath}\"" : "";
+
                     string fallbackArgs =
                         "--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443,50000-50099 " +
                         "--filter-udp=50000-50099 --dpi-desync=fake --dpi-desync-any-protocol=1 --dpi-desync-repeats=6 --new " +
-                        "--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --new " +
-                        "--filter-tcp=80,443 --dpi-desync=disorder2 --dpi-desync-split-pos=1";
+                        $"--filter-udp=443{excludeArg} --dpi-desync=fake --dpi-desync-repeats=6 --new " +
+                        $"--filter-tcp=80,443{excludeArg} --dpi-desync=disorder2 --dpi-desync-split-pos=1";
 
                     var fallbackPsi = new ProcessStartInfo(winwsPath, fallbackArgs)
                     {
@@ -637,7 +750,6 @@ namespace DnsSwitcherPro
                     SetBrowserDpiOptimizationPolicies(enableOptimization: false);
                 }
 
-                // Принудительно выгружаем ядерный драйвер WinDivert, чтобы он не оставался висеть между перезапусками
                 RunCommand("sc stop WinDivert");
                 RunCommand("sc stop WinDivert14");
                 RunCommand("ipconfig /flushdns");
@@ -2514,12 +2626,12 @@ namespace DnsSwitcherPro
 
             var profiles = new (int id, string title, string desc)[]
             {
-                (1, "Профиль #1 — Multidisorder (1,midsld) + Анти-Kyber",
-                    "Двойное разрезание TLS SNI для всех сайтов, YouTube и Discord + отключение раздутых пакетов Kyber при перезапуске браузера."),
-                (2, "Профиль #2 — Multisplit + SeqOvl=2 (Для YouTube)",
-                    "Разделение пакета с наложением 2 байт без badseq. Стабильно держит соединение после перезапуска браузера."),
-                (3, "Профиль #3 — Fake + Disorder2 (Fooling TS)",
-                    "Отправка маскировочных пакетов с временной меткой TS для жёстких ТСПУ провайдеров.")
+                (1, "Профиль #1 — YouTube/Discord + Исключение Gemini/DNS",
+                    "Разрезает пакеты (1,midsld) строго для YouTube и Discord. Полностью исключает трафик Gemini, ChatGPT и всех DNS-серверов."),
+                (2, "Профиль #2 — Multisplit + SeqOvl=2 (С исключением Gemini)",
+                    "Наложение 2 байт для YouTube и Discord со списком исключений для прокси DNS и ИИ-сервисов."),
+                (3, "Профиль #3 — Глобальный + Исключение Gemini и DNS",
+                    "Применяет обход ко всем сайтам и видеосерверам, кроме списка исключений (Gemini, ИИ, Comss, Malw, GeoHide).")
             };
 
             foreach (var p in profiles)
