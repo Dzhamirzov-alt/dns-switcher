@@ -5,6 +5,7 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
@@ -100,6 +101,8 @@ namespace DnsSwitcherPro
         private TextBlock listHeader = null!;
         private Border pingBtnBorder = null!;
         private TextBlock pingBtnText = null!;
+        private Border checkGeminiRegionBtn = null!;
+        private TextBlock checkGeminiRegionText = null!;
         private Border clearGeminiCacheBtn = null!;
         private Border dpiBypassBtn = null!;
         private TextBlock dpiBypassText = null!;
@@ -278,6 +281,285 @@ namespace DnsSwitcherPro
             };
         }
 
+        // =========================================================================
+        // ДИАГНОСТИКА СКРЫТИЯ МЕСТОПОЛОЖЕНИЯ ДЛЯ GOOGLE GEMINI (WINDOWS)
+        // =========================================================================
+        private bool IsDirectGoogleIp(string ip)
+        {
+            string[] directPrefixes = new[]
+            {
+                "142.250.", "142.251.", "172.217.", "172.253.",
+                "216.58.", "74.125.", "173.194.", "108.177.",
+                "64.233.", "209.85.", "216.239."
+            };
+            return directPrefixes.Any(p => ip.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private void ShowGeminiRegionCheckDialog(bool returnToSettings = false, bool returnToNetworkSettings = false)
+        {
+            var dlg = CreateModalDialog("Защита и регион Gemini", () =>
+            {
+                if (returnToNetworkSettings) ShowNetworkSettingsDialog();
+                else if (returnToSettings) ShowSettingsDialog();
+            });
+
+            var root = new StackPanel();
+            root.Children.Add(CreateDialogHeader("🕵️ Защита и регион Gemini"));
+
+            var verdictTitle = new TextBlock
+            {
+                Text = "⏳ Выполняется проверка маршрутизации...",
+                FontSize = 14,
+                FontWeight = FontWeights.Bold,
+                Foreground = BrushFromHex(accentColorHex),
+                TextWrapping = TextWrapping.Wrap
+            };
+
+            var verdictDetails = new TextBlock
+            {
+                Text = "Проверяем перехват домена gemini.google.com, геолокацию прокси-узла, защиту IPv6 и статус капчи Google...",
+                FontSize = 12,
+                Foreground = BrushFromHex(textSubColorHex),
+                Margin = new Thickness(0, 8, 0, 0),
+                TextWrapping = TextWrapping.Wrap
+            };
+
+            var verdictStack = new StackPanel();
+            verdictStack.Children.Add(verdictTitle);
+            verdictStack.Children.Add(verdictDetails);
+
+            var verdictCard = new Border
+            {
+                Background = BrushFromHex(bgCardHex),
+                BorderBrush = BrushFromHex(accentColorHex),
+                BorderThickness = new Thickness(1.5),
+                CornerRadius = new CornerRadius(14),
+                Padding = new Thickness(14, 12, 14, 12),
+                Margin = new Thickness(0, 0, 0, 10),
+                Child = verdictStack
+            };
+            root.Children.Add(verdictCard);
+
+            Border switchNextBtn = null!;
+            switchNextBtn = CreateDialogButton("🔄 Сменить DNS-сервер (Обойти капчу / блок)", "#FFAB00", () =>
+            {
+                string currentHost = config.LastActiveHost;
+                var candidates = serverList
+                    .Where(s => s.ping != -3 && !s.host.Equals(currentHost, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                var nextServer = candidates.FirstOrDefault()
+                                 ?? serverList.FirstOrDefault(s => !s.host.Equals(currentHost, StringComparison.OrdinalIgnoreCase));
+                if (nextServer != null)
+                {
+                    ApplyWindowsDnsServer(nextServer.host);
+                    dlg.Close();
+                    ShowGeminiRegionCheckDialog(returnToSettings, returnToNetworkSettings);
+                }
+            }, "#261A00", "#FFAB00");
+            switchNextBtn.Visibility = Visibility.Collapsed;
+            root.Children.Add(switchNextBtn);
+
+            async void RunDiagnosticAsync()
+            {
+                verdictTitle.Text = "⏳ Выполняется проверка маршрутизации...";
+                verdictTitle.Foreground = BrushFromHex(accentColorHex);
+                verdictCard.BorderBrush = BrushFromHex(accentColorHex);
+                verdictCard.Background = BrushFromHex(bgCardHex);
+                verdictDetails.Text = "Опрашиваем системный DNS и сервер gemini.google.com...";
+                switchNextBtn.Visibility = Visibility.Collapsed;
+
+                string mode = config.CurrentMode;
+                string activeHost = config.LastActiveHost;
+                string dnsLabel = mode == "on" && !string.IsNullOrEmpty(activeHost) ? activeHost : $"Выключен ({mode})";
+
+                string ipv4ProxyIp = "";
+                bool hasIpv6Leak = !config.BlockIpv6;
+                bool isInterceptedByProxy = false;
+                string proxyCountry = "Неизвестно";
+                string proxyCountryCode = "";
+                string proxyOrg = "";
+                bool isCaptchaDetected = false;
+                bool isRegionUnsupportedRedirect = false;
+                var browserConflicts = CheckBrowserDnsConflicts();
+
+                await Task.Run(async () =>
+                {
+                    try
+                    {
+                        RunCommand("ipconfig /flushdns");
+                        var addresses = Dns.GetHostAddresses("gemini.google.com");
+                        var ipv4List = addresses
+                            .Where(a => a.AddressFamily == AddressFamily.InterNetwork)
+                            .Select(a => a.ToString())
+                            .Where(ip => ip != "0.0.0.0" && ip != "127.0.0.1")
+                            .ToList();
+
+                        var ipv6List = addresses
+                            .Where(a => a.AddressFamily == AddressFamily.InterNetworkV6)
+                            .Select(a => a.ToString())
+                            .ToList();
+
+                        if (ipv4List.Count > 0)
+                        {
+                            ipv4ProxyIp = ipv4List[0];
+                            isInterceptedByProxy = !IsDirectGoogleIp(ipv4ProxyIp);
+                        }
+
+                        if (ipv6List.Any(ip => ip.StartsWith("2a00:1450:", StringComparison.OrdinalIgnoreCase) ||
+                                               ip.StartsWith("2607:f8b0:", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            hasIpv6Leak = true;
+                        }
+
+                        using var handler = new HttpClientHandler { AllowAutoRedirect = false };
+                        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromMilliseconds(4500) };
+                        http.DefaultRequestHeaders.UserAgent.ParseAdd(
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
+
+                        if (!string.IsNullOrEmpty(ipv4ProxyIp))
+                        {
+                            try
+                            {
+                                string geoJson = await http.GetStringAsync(
+                                    $"http://ip-api.com/json/{ipv4ProxyIp}?fields=status,country,countryCode,org,isp&lang=ru");
+                                var node = JsonNode.Parse(geoJson);
+                                if (node?["status"]?.GetValue<string>() == "success")
+                                {
+                                    proxyCountry = node["country"]?.GetValue<string>() ?? "Неизвестно";
+                                    proxyCountryCode = node["countryCode"]?.GetValue<string>() ?? "";
+                                    proxyOrg = node["org"]?.GetValue<string>() ?? node["isp"]?.GetValue<string>() ?? "";
+                                }
+                            }
+                            catch { }
+                        }
+
+                        try
+                        {
+                            using var resp = await http.GetAsync("https://gemini.google.com/app");
+                            int code = (int)resp.StatusCode;
+                            string loc = resp.Headers.Location?.ToString() ?? "";
+
+                            if (code == 429 || code == 503 ||
+                                loc.Contains("/sorry/", StringComparison.OrdinalIgnoreCase) ||
+                                loc.Contains("ipv4.google.com/sorry", StringComparison.OrdinalIgnoreCase))
+                            {
+                                isCaptchaDetected = true;
+                            }
+                            else if (loc.Contains("faq", StringComparison.OrdinalIgnoreCase) ||
+                                     loc.Contains("unsupported", StringComparison.OrdinalIgnoreCase))
+                            {
+                                isRegionUnsupportedRedirect = true;
+                            }
+                        }
+                        catch { }
+                    }
+                    catch { }
+                });
+
+                var report = new StringBuilder();
+                report.AppendLine($"• Системный DNS: {dnsLabel}");
+                report.AppendLine($"• IP для gemini.google.com: {(string.IsNullOrEmpty(ipv4ProxyIp) ? "Нет ответа ❌" : ipv4ProxyIp)}");
+                if (!string.IsNullOrEmpty(proxyCountryCode))
+                {
+                    report.AppendLine($"• Видимая страна для Gemini: {proxyCountry} ({proxyCountryCode})");
+                }
+                if (!string.IsNullOrEmpty(proxyOrg))
+                {
+                    report.AppendLine($"• Узел маршрутизации: {proxyOrg}");
+                }
+                report.AppendLine($"• Защита от утечки IPv6: {(hasIpv6Leak ? "⚠️ IPv6 включён (риск утечки региона)" : "✅ Защищено (IPv4 Only)")}");
+                report.AppendLine($"• Браузеры: {(browserConflicts.Count > 0 ? $"⚠️ Конфликт в {string.Join(", ", browserConflicts.Select(c => c.BrowserName))}" : "✅ Подчиняются системе")}");
+
+                if (mode != "on")
+                {
+                    verdictTitle.Text = "❌ Реальное местоположение НЕ скрыто!";
+                    verdictTitle.Foreground = BrushFromHex("#FF5252");
+                    verdictCard.BorderBrush = BrushFromHex("#FF5252");
+                    verdictCard.Background = BrushFromHex(config.LightMode ? "#FFEBEE" : "#1F1214");
+                    report.Append("\nПричина: Системный режим DNS отключен или стоит в режиме «Авто». Включите режим «Вкл» и выберите сервер (например, Comss.one или Malw.link).");
+                    switchNextBtn.Visibility = Visibility.Visible;
+                }
+                else if (string.IsNullOrEmpty(ipv4ProxyIp))
+                {
+                    verdictTitle.Text = "⚠️ Нет ответа от текущего DNS-сервера";
+                    verdictTitle.Foreground = BrushFromHex("#FF5252");
+                    verdictCard.BorderBrush = BrushFromHex("#FF5252");
+                    verdictCard.Background = BrushFromHex(config.LightMode ? "#FFEBEE" : "#1F1214");
+                    report.Append("\nНе удалось разрешить домен gemini.google.com. Нажмите кнопку ниже для переключения на другой сервер.");
+                    switchNextBtn.Visibility = Visibility.Visible;
+                }
+                else if (!isInterceptedByProxy ||
+                         proxyCountryCode.Equals("RU", StringComparison.OrdinalIgnoreCase) ||
+                         proxyCountryCode.Equals("BY", StringComparison.OrdinalIgnoreCase) ||
+                         isRegionUnsupportedRedirect)
+                {
+                    verdictTitle.Text = "❌ Местоположение НЕ скрыто от Gemini!";
+                    verdictTitle.Foreground = BrushFromHex("#FF5252");
+                    verdictCard.BorderBrush = BrushFromHex("#FF5252");
+                    verdictCard.Background = BrushFromHex(config.LightMode ? "#FFEBEE" : "#1F1214");
+                    report.Append($"\nПричина: Сервер ({activeHost}) направляет трафик напрямую в Google без маскировки региона. Переключитесь на Comss.one, Malw.link или GeoHide!");
+                    switchNextBtn.Visibility = Visibility.Visible;
+                }
+                else if (isCaptchaDetected)
+                {
+                    verdictTitle.Text = "⚠️ Местоположение скрыто, но IP перегружен (Капча)";
+                    verdictTitle.Foreground = BrushFromHex("#FFAB00");
+                    verdictCard.BorderBrush = BrushFromHex("#FFAB00");
+                    verdictCard.Background = BrushFromHex("#261A00");
+                    report.Append($"\nВаше местоположение скрыто ({proxyCountry}), но Google временно выдал капчу «Подозрительный трафик» на прокси-IP {ipv4ProxyIp}.\n\nРешение: Нажмите «Сменить DNS-сервер» ниже и очистите кэш Gemini!");
+                    switchNextBtn.Visibility = Visibility.Visible;
+                }
+                else if (browserConflicts.Count > 0)
+                {
+                    verdictTitle.Text = "⚠️ DNS настроен, но браузер обходит защиту!";
+                    verdictTitle.Foreground = BrushFromHex("#FFAB00");
+                    verdictCard.BorderBrush = BrushFromHex("#FFAB00");
+                    verdictCard.Background = BrushFromHex("#261A00");
+                    report.Append($"\nСистема направляет Gemini через «{proxyCountry}», но в браузере ({string.Join(", ", browserConflicts.Select(c => c.BrowserName))}) включён сторонний DNS, который выдаёт ваш реальный регион.");
+                }
+                else
+                {
+                    verdictTitle.Text = "✅ Местоположение успешно скрыто!";
+                    verdictTitle.Foreground = BrushFromHex(accentColorHex);
+                    verdictCard.BorderBrush = BrushFromHex(accentColorHex);
+                    verdictCard.Background = BrushFromHex(accentCardBgHex);
+                    report.Append($"\nОтлично! Google Gemini видит ваше подключение из региона «{proxyCountry} ({proxyCountryCode})». Региональных ограничений и капчи не обнаружено.");
+                }
+
+                verdictDetails.Text = report.ToString();
+            }
+
+            root.Children.Add(CreateDialogButton("🔄 Проверить ещё раз", accentColorHex, () =>
+            {
+                RunDiagnosticAsync();
+            }, accentCardBgHex, accentColorHex));
+
+            root.Children.Add(CreateDialogButton("🧹 Очистить кэш и куки Gemini", textMainColorHex, () =>
+            {
+                ClearGeminiCookiesAndCache();
+            }));
+
+            root.Children.Add(CreateDialogButton("Закрыть", textSubColorHex, () =>
+            {
+                dlg.Close();
+                if (returnToNetworkSettings) ShowNetworkSettingsDialog();
+                else if (returnToSettings) ShowSettingsDialog();
+            }));
+
+            dlg.Content = new Border
+            {
+                Background = BrushFromHex(config.LightMode ? "#FFFFFF" : "#0F1117"),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(20),
+                Padding = new Thickness(22, 18, 22, 18),
+                Child = root
+            };
+
+            dlg.Loaded += (s, e) => RunDiagnosticAsync();
+            dlg.ShowDialog();
+        }
+
         private void EnsureDpiProcessAlive()
         {
             if (!config.EnableDpiBypass || isStartingDpi) return;
@@ -300,13 +582,10 @@ namespace DnsSwitcherPro
             return null;
         }
 
-        // Формируем список исключений (list-exclude-gemini-dns.txt) без BOM:
-        // Zapret НИКОГДА не будет трогать трафик к прокси-серверам DNS, сайту Gemini и другим ИИ-сервисам
         private string BuildExcludeHostlistFile(string dpiDir)
         {
             var excludeDomains = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
-                // Домены Google Gemini, AI Studio и авторизации Google
                 "gemini.google.com",
                 "www.gemini.google.com",
                 "aistudio.google.com",
@@ -325,8 +604,6 @@ namespace DnsSwitcherPro
                 "gstatic.com",
                 "www.gstatic.com",
                 "ssl.gstatic.com",
-
-                // Зарубежные ИИ и сервисы, работающие через умный DNS (Comss / Malw / GeoHide / Xbox)
                 "chatgpt.com",
                 "openai.com",
                 "auth.openai.com",
@@ -350,8 +627,6 @@ namespace DnsSwitcherPro
                 "xbox.com",
                 "microsoft.com",
                 "live.com",
-
-                // Домены всех DNS-серверов (чтобы Zapret не ломал DoH-запросы на порту 443)
                 "dns.comss.one",
                 "comss.one",
                 "comss.dns.controld.com",
@@ -378,7 +653,6 @@ namespace DnsSwitcherPro
                 "security-filter-dns.cleanbrowsing.org"
             };
 
-            // Добавляем все пользовательские DNS-хосты из текущего списка серверов
             foreach (var s in serverList)
             {
                 if (!string.IsNullOrWhiteSpace(s.host))
@@ -387,7 +661,6 @@ namespace DnsSwitcherPro
                 }
             }
 
-            // Подгружаем также стандартный список исключений из сборки Flowseal, если он есть
             string? flowsealExclude = FindDpiAsset(dpiDir, "list-exclude.txt");
             if (flowsealExclude != null && File.Exists(flowsealExclude))
             {
@@ -415,7 +688,6 @@ namespace DnsSwitcherPro
             return excludePath;
         }
 
-        // Формируем целевой список ТОЛЬКО для YouTube, Discord и заблокированных сайтов (без доменов Gemini и без DNS-серверов)
         private string BuildCombinedHostlistFile(string dpiDir, HashSet<string> excludedSet)
         {
             var domains = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -471,7 +743,6 @@ namespace DnsSwitcherPro
                 }
             }
 
-            // Удаляем любые пересечения со списком исключений
             domains.ExceptWith(excludedSet);
 
             string combinedPath = Path.Combine(dpiDir, "list-combined.txt");
@@ -548,7 +819,6 @@ namespace DnsSwitcherPro
             RunCommand("netsh int tcp set global timestamps=enabled");
         }
 
-        // Формирование аргументов Zapret со строгим исключением доменов Gemini и всех DNS-серверов (--hostlist-exclude)
         private string BuildZapretArguments(string dpiDir)
         {
             string? quicBin = FindDpiAsset(dpiDir, "quic_initial_www_google_com.bin");
@@ -575,7 +845,6 @@ namespace DnsSwitcherPro
 
             if (profile == 2)
             {
-                // Профиль #2: Multisplit + SeqOvl=2 по целевому списку YouTube/Discord с исключением Gemini/DNS
                 string patternArg = tlsBin != null ? $" --dpi-desync-split-seqovl-pattern=\"{tlsBin}\"" : "";
                 return $"--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443,50000-50099 " +
                        $"{discordVoicePart}" +
@@ -584,7 +853,6 @@ namespace DnsSwitcherPro
             }
             else if (profile == 3)
             {
-                // Профиль #3: Глобальный Multidisorder (1,midsld) для всех сайтов и кэш-серверов, НО со строгим исключением Gemini, ИИ и DNS-серверов!
                 return $"--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443,50000-50099 " +
                        $"{discordVoicePart}" +
                        $"{udpQuicPart}" +
@@ -592,8 +860,6 @@ namespace DnsSwitcherPro
             }
             else
             {
-                // Профиль #1 (Рекомендуемый):
-                // Двойное разрезание multidisorder (1,midsld) строго по списку YouTube и Discord + полная защита трафика Gemini и DNS-прокси
                 return $"--wf-l3=ipv4 --wf-tcp=80,443 --wf-udp=443,50000-50099 " +
                        $"{discordVoicePart}" +
                        $"{udpQuicPart}" +
@@ -655,7 +921,6 @@ namespace DnsSwitcherPro
                 dpiProcess = Process.Start(psi);
                 Task.Delay(350).Wait();
 
-                // Если версия winws.exe не поддерживает midsld — запускаем классический disorder2 со списком исключений Gemini/DNS
                 if (dpiProcess == null || dpiProcess.HasExited)
                 {
                     string excludeListPath = BuildExcludeHostlistFile(dpiDir);
@@ -1234,10 +1499,12 @@ namespace DnsSwitcherPro
                     }
                 }
 
+                RunCommand("ipconfig /flushdns");
+
                 MessageBox.Show(
                     cleanedCount > 0
-                        ? "✅ Кэш и куки Google/Gemini успешно очищены!\nПерезапустите браузер или вкладку Gemini."
-                        : "ℹ️ Закройте браузер перед очисткой (файлы заняты процессом) либо кэш уже чист.",
+                        ? "✅ Кэш, куки Google/Gemini и системный DNS-кэш успешно очищены!\nПерезапустите браузер или вкладку Gemini."
+                        : "✅ Системный DNS-кэш сброшен!\nℹ️ Чтобы очистить также файлы куки браузера — закройте браузер перед нажатием этой кнопки.",
                     "Очистка Gemini Cache",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);
@@ -1485,9 +1752,9 @@ namespace DnsSwitcherPro
 
             rootScroll.ScrollChanged += (s, e) => UpdateScrollBarVisibility();
 
-            mainLayout = new StackPanel { Margin = new Thickness(18, 16, 18, 16) };
+            mainLayout = new StackPanel { Margin = new Thickness(18, 14, 18, 14) };
 
-            var topGrid = new Grid { Margin = new Thickness(0, 0, 0, 12) };
+            var topGrid = new Grid { Margin = new Thickness(0, 0, 0, 10) };
             topGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             topGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
@@ -1543,8 +1810,8 @@ namespace DnsSwitcherPro
                 BorderBrush = BrushFromHex(bgCardStrokeHex),
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(12),
-                Padding = new Thickness(14, 10, 14, 10),
-                Margin = new Thickness(0, 0, 0, 10),
+                Padding = new Thickness(14, 9, 14, 9),
+                Margin = new Thickness(0, 0, 0, 8),
                 Cursor = Cursors.Hand,
                 Child = netStatusText
             };
@@ -1566,8 +1833,8 @@ namespace DnsSwitcherPro
                 BorderBrush = BrushFromHex("#FFAB00"),
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(12),
-                Padding = new Thickness(14, 9, 14, 9),
-                Margin = new Thickness(0, 0, 0, 10),
+                Padding = new Thickness(14, 8, 14, 8),
+                Margin = new Thickness(0, 0, 0, 8),
                 Visibility = Visibility.Collapsed,
                 Cursor = Cursors.Hand,
                 Child = browserWarningText
@@ -1625,35 +1892,61 @@ namespace DnsSwitcherPro
                 BorderBrush = BrushFromHex(bgCardStrokeHex),
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(16),
-                Padding = new Thickness(16, 12, 16, 12),
-                Margin = new Thickness(0, 0, 0, 10),
+                Padding = new Thickness(16, 11, 16, 11),
+                Margin = new Thickness(0, 0, 0, 8),
                 Child = modeInner
             };
             mainLayout.Children.Add(modeCard);
 
-            var clearGeminiText = new TextBlock
+            // Кнопка 1: Проверка защиты и скрытия региона от Google Gemini
+            checkGeminiRegionText = new TextBlock
             {
-                Text = "🧹 Очистить кэш и куки Gemini (Решить проблему региона)",
+                Text = "🕵️ Проверить защиту и регион Gemini (Тест IP и капчи)",
                 FontSize = 12,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = BrushFromHex(accentColorHex),
                 HorizontalAlignment = HorizontalAlignment.Center
             };
 
-            clearGeminiCacheBtn = new Border
+            checkGeminiRegionBtn = new Border
             {
                 Background = BrushFromHex(accentCardBgHex),
                 BorderBrush = BrushFromHex(accentColorHex),
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(12),
-                Padding = new Thickness(14, 9, 14, 9),
-                Margin = new Thickness(0, 0, 0, 8),
+                Padding = new Thickness(14, 8, 14, 8),
+                Margin = new Thickness(0, 0, 0, 7),
+                Cursor = Cursors.Hand,
+                Child = checkGeminiRegionText
+            };
+            checkGeminiRegionBtn.MouseLeftButtonUp += (s, e) => ShowGeminiRegionCheckDialog();
+            mainLayout.Children.Add(checkGeminiRegionBtn);
+
+            // Кнопка 2: Очистка кэша и куки Gemini
+            var clearGeminiText = new TextBlock
+            {
+                Text = "🧹 Очистить кэш и куки Gemini (Сбросить старый регион)",
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = BrushFromHex(textMainColorHex),
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+
+            clearGeminiCacheBtn = new Border
+            {
+                Background = BrushFromHex(bgCardHex),
+                BorderBrush = BrushFromHex(bgCardStrokeHex),
+                BorderThickness = new Thickness(1.5),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(14, 8, 14, 8),
+                Margin = new Thickness(0, 0, 0, 7),
                 Cursor = Cursors.Hand,
                 Child = clearGeminiText
             };
             clearGeminiCacheBtn.MouseLeftButtonUp += (s, e) => ClearGeminiCookiesAndCache();
             mainLayout.Children.Add(clearGeminiCacheBtn);
 
+            // Кнопка 3: Обход DPI (Zapret)
             dpiBypassText = new TextBlock
             {
                 FontSize = 12,
@@ -1665,8 +1958,8 @@ namespace DnsSwitcherPro
             {
                 CornerRadius = new CornerRadius(12),
                 BorderThickness = new Thickness(1.5),
-                Padding = new Thickness(14, 9, 14, 9),
-                Margin = new Thickness(0, 0, 0, 14),
+                Padding = new Thickness(14, 8, 14, 8),
+                Margin = new Thickness(0, 0, 0, 12),
                 Cursor = Cursors.Hand,
                 Child = dpiBypassText
             };
@@ -1675,7 +1968,7 @@ namespace DnsSwitcherPro
             UpdateDpiButtonVisualState();
             mainLayout.Children.Add(dpiBypassBtn);
 
-            var headerGrid = new Grid { Margin = new Thickness(0, 0, 0, 10) };
+            var headerGrid = new Grid { Margin = new Thickness(0, 0, 0, 8) };
             headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
@@ -1760,8 +2053,8 @@ namespace DnsSwitcherPro
                 BorderBrush = BrushFromHex(accentColorHex),
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(12),
-                Padding = new Thickness(14, 9, 14, 9),
-                Margin = new Thickness(0, 0, 0, 10),
+                Padding = new Thickness(14, 8, 14, 8),
+                Margin = new Thickness(0, 0, 0, 8),
                 Visibility = Visibility.Collapsed,
                 Child = undoGrid
             };
@@ -1833,9 +2126,12 @@ namespace DnsSwitcherPro
             pingBtnBorder.Background = BrushFromHex(accentCardBgHex);
             pingBtnBorder.BorderBrush = BrushFromHex(accentColorHex);
             pingBtnText.Foreground = BrushFromHex(accentColorHex);
-            clearGeminiCacheBtn.Background = BrushFromHex(accentCardBgHex);
-            clearGeminiCacheBtn.BorderBrush = BrushFromHex(accentColorHex);
-            ((TextBlock)clearGeminiCacheBtn.Child).Foreground = BrushFromHex(accentColorHex);
+            checkGeminiRegionBtn.Background = BrushFromHex(accentCardBgHex);
+            checkGeminiRegionBtn.BorderBrush = BrushFromHex(accentColorHex);
+            checkGeminiRegionText.Foreground = BrushFromHex(accentColorHex);
+            clearGeminiCacheBtn.Background = BrushFromHex(bgCardHex);
+            clearGeminiCacheBtn.BorderBrush = BrushFromHex(bgCardStrokeHex);
+            ((TextBlock)clearGeminiCacheBtn.Child).Foreground = BrushFromHex(textMainColorHex);
             UpdateDpiButtonVisualState();
             undoBanner.Background = BrushFromHex(bgCardHex);
             undoBanner.BorderBrush = BrushFromHex(accentColorHex);
@@ -2191,8 +2487,8 @@ namespace DnsSwitcherPro
                     BorderBrush = BrushFromHex(isSelected ? accentColorHex : bgCardStrokeHex),
                     BorderThickness = new Thickness(1.5),
                     CornerRadius = new CornerRadius(14),
-                    Padding = new Thickness(14, 9, 12, 9),
-                    Margin = new Thickness(0, 0, 0, i == serverList.Count - 1 ? 0 : 7),
+                    Padding = new Thickness(14, 8, 12, 8),
+                    Margin = new Thickness(0, 0, 0, i == serverList.Count - 1 ? 0 : 6),
                     Cursor = Cursors.Hand,
                     Child = cardGrid
                 };
@@ -2301,7 +2597,7 @@ namespace DnsSwitcherPro
             var win = new Window
             {
                 Title = title,
-                Width = 395,
+                Width = 405,
                 SizeToContent = SizeToContent.Height,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
                 Owner = this,
@@ -2333,7 +2629,7 @@ namespace DnsSwitcherPro
                 FontWeight = FontWeights.SemiBold,
                 Foreground = BrushFromHex(textMainColorHex),
                 HorizontalAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(8, 4, 8, 18)
+                Margin = new Thickness(8, 4, 8, 16)
             };
         }
 
@@ -2362,8 +2658,8 @@ namespace DnsSwitcherPro
                 BorderBrush = BrushFromHex(customStroke ?? bgCardStrokeHex),
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(12),
-                Padding = new Thickness(14, 11, 14, 11),
-                Margin = new Thickness(0, 0, 0, 10),
+                Padding = new Thickness(14, 10, 14, 10),
+                Margin = new Thickness(0, 0, 0, 9),
                 Cursor = Cursors.Hand,
                 Child = stack
             };
@@ -2379,7 +2675,7 @@ namespace DnsSwitcherPro
                 BorderBrush = BrushFromHex(strokeHex ?? bgCardStrokeHex),
                 BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(12),
-                Padding = new Thickness(14, 11, 14, 11),
+                Padding = new Thickness(14, 10, 14, 10),
                 Margin = new Thickness(0, 6, 0, 0),
                 Cursor = Cursors.Hand,
                 Child = new TextBlock
@@ -2419,6 +2715,12 @@ namespace DnsSwitcherPro
                 dlg.Close();
                 ShowBenchmarkDialog();
             }));
+
+            root.Children.Add(CreateMenuCard("🕵️ Проверить защиту и регион Gemini", "Тест скрытия местоположения, прокси-страны и капчи", () =>
+            {
+                dlg.Close();
+                ShowGeminiRegionCheckDialog(returnToSettings: true);
+            }, accentColorHex));
 
             root.Children.Add(CreateMenuCard("🌐 Сетевые настройки", "Обход DPI (Zapret), профиль DPI, браузеры, IPv6, DoH", () =>
             {
@@ -2532,6 +2834,13 @@ namespace DnsSwitcherPro
                 : (browserConflicts.Count > 0
                     ? $"⚠️ Обнаружен конфликт ({string.Join(", ", browserConflicts.Select(c => c.BrowserName))})! Нажмите для решения"
                     : "Сейчас: Мониторинг активен (конфликтов не обнаружено)");
+
+            root.Children.Add(CreateMenuCard("🕵️ Проверить защиту и регион Gemini",
+                "Проверить видимую страну для Gemini, IP-прокси и наличие капчи Google", () =>
+            {
+                dlg.Close();
+                ShowGeminiRegionCheckDialog(returnToSettings: false, returnToNetworkSettings: true);
+            }, accentColorHex));
 
             root.Children.Add(CreateMenuCard("🛡️ Обход DPI (Zapret) — Вкл / Выкл",
                 config.EnableDpiBypass
@@ -3112,6 +3421,13 @@ namespace DnsSwitcherPro
                 if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
                 RecalculateWindowHeight();
                 Activate();
+            });
+            menu.Items.Add("🕵️ Проверить регион Gemini", null, (s, e) =>
+            {
+                Show();
+                if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+                Activate();
+                ShowGeminiRegionCheckDialog();
             });
             menu.Items.Add(new Forms.ToolStripSeparator());
 
