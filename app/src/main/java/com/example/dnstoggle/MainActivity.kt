@@ -49,7 +49,6 @@ import org.json.JSONObject
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
@@ -145,11 +144,9 @@ class MainActivity : Activity() {
     private lateinit var settingsBtn: TextView
     private lateinit var listHeader: TextView
 
-    // Новые кнопки для Gemini (очистка кэша и проверка скрытия региона)
     private lateinit var checkGeminiRegionBtn: TextView
     private lateinit var clearGeminiCacheBtn: TextView
 
-    // Элементы плашки возврата удаленного сервера (Undo)
     private lateinit var undoBanner: LinearLayout
     private lateinit var undoText: TextView
     private lateinit var undoActionBtn: TextView
@@ -165,13 +162,11 @@ class MainActivity : Activity() {
     private var backCallback: OnBackInvokedCallback? = null
     private var isUpdatingUi = false
 
-    // Цветовые палитры и темы
     private var currentThemeKey = "green"
     private var isLightMode = false
     private var accentColorHex = "#00E676"
     private var accentCardBgHex = "#0D2318"
 
-    // Динамические цвета для темной/светлой темы
     private var bgRootHex = "#08080A"
     private var bgCardHex = "#121418"
     private var bgCardStrokeHex = "#1E222B"
@@ -577,7 +572,6 @@ class MainActivity : Activity() {
         modeCard.addView(modeGroup)
         mainLayout.addView(modeCard)
 
-        // Кнопка 1: Проверка скрытия местоположения для Google Gemini
         checkGeminiRegionBtn = TextView(this).apply {
             text = "🕵️ Проверить защиту и регион Gemini"
             textSize = 13f
@@ -596,7 +590,6 @@ class MainActivity : Activity() {
         }
         mainLayout.addView(checkGeminiRegionBtn)
 
-        // Кнопка 2: Очистка кэша для браузера и мобильного приложения Gemini
         clearGeminiCacheBtn = TextView(this).apply {
             text = "🧹 Очистить кэш Gemini и браузера (Сброс капчи)"
             textSize = 13f
@@ -649,7 +642,6 @@ class MainActivity : Activity() {
         headerRow.addView(pingBtn)
         mainLayout.addView(headerRow)
 
-        // Плашка отмены удаления (Undo Banner)
         undoBanner = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -703,7 +695,7 @@ class MainActivity : Activity() {
     }
 
     // =========================================================================
-    // ФУНКЦИЯ 1: ДИАГНОСТИКА СКРЫТИЯ МЕСТОПОЛОЖЕНИЯ ДЛЯ GOOGLE GEMINI
+    // ФУНКЦИЯ 1: ДИАГНОСТИКА СКРЫТИЯ МЕСТОПОЛОЖЕНИЯ ДЛЯ GOOGLE GEMINI (ПО HTTPS)
     // =========================================================================
     private fun isDirectGoogleIp(ip: String): Boolean {
         val directPrefixes = listOf(
@@ -712,6 +704,111 @@ class MainActivity : Activity() {
             "64.233.", "209.85.", "216.239."
         )
         return directPrefixes.any { ip.startsWith(it) }
+    }
+
+    private fun countryCodeToRussianName(code: String): String {
+        return when (code.uppercase()) {
+            "NL" -> "Нидерланды"
+            "DE" -> "Германия"
+            "FI" -> "Финляндия"
+            "US" -> "США"
+            "GB", "UK" -> "Великобритания"
+            "FR" -> "Франция"
+            "SE" -> "Швеция"
+            "PL" -> "Польша"
+            "LV" -> "Латвия"
+            "LT" -> "Литва"
+            "EE" -> "Эстония"
+            "CZ" -> "Чехия"
+            "AT" -> "Австрия"
+            "CH" -> "Швейцария"
+            "IT" -> "Италия"
+            "ES" -> "Испания"
+            "TR" -> "Турция"
+            "KZ" -> "Казахстан"
+            "SG" -> "Сингапур"
+            "JP" -> "Япония"
+            "CA" -> "Канада"
+            "IE" -> "Ирландия"
+            "RO" -> "Румыния"
+            "BG" -> "Болгария"
+            "UA" -> "Украина"
+            "RU" -> "Россия"
+            "BY" -> "Беларусь"
+            else -> code.uppercase()
+        }
+    }
+
+    // Опрос геолокации прокси-IP строго по зашифрованному HTTPS (не блокируется политикой Cleartext в Android)
+    private fun lookupGeoIpHttps(ip: String): Triple<String, String, String> {
+        // 1. Основной HTTPS-сервис с поддержкой русского языка: ipwho.is
+        try {
+            val url1 = URL("https://ipwho.is/$ip?lang=ru")
+            val conn1 = (url1.openConnection() as HttpsURLConnection).apply {
+                connectTimeout = 3500
+                readTimeout = 3500
+                setRequestProperty("User-Agent", "Mozilla/5.0")
+            }
+            if (conn1.responseCode == 200) {
+                val json = JSONObject(conn1.inputStream.bufferedReader().use { it.readText() })
+                if (json.optBoolean("success", true)) {
+                    val code = json.optString("country_code", "").uppercase()
+                    var country = json.optString("country", "")
+                    if (country.isEmpty() && code.isNotEmpty()) country = countryCodeToRussianName(code)
+                    val connObj = json.optJSONObject("connection")
+                    val org = connObj?.optString("org", "")?.ifEmpty { connObj.optString("isp", "") } ?: ""
+                    if (country.isNotEmpty() || code.isNotEmpty()) {
+                        conn1.disconnect()
+                        return Triple(country, code, org)
+                    }
+                }
+            }
+            conn1.disconnect()
+        } catch (_: Exception) {}
+
+        // 2. Резервный HTTPS-сервис: geojs.io
+        try {
+            val url2 = URL("https://get.geojs.io/v1/ip/geo/$ip.json")
+            val conn2 = (url2.openConnection() as HttpsURLConnection).apply {
+                connectTimeout = 3500
+                readTimeout = 3500
+                setRequestProperty("User-Agent", "Mozilla/5.0")
+            }
+            if (conn2.responseCode == 200) {
+                val json = JSONObject(conn2.inputStream.bufferedReader().use { it.readText() })
+                val code = json.optString("country_code", "").uppercase()
+                val country = if (code.isNotEmpty()) countryCodeToRussianName(code) else json.optString("country", "")
+                val org = json.optString("organization_name", json.optString("organization", ""))
+                if (country.isNotEmpty() || code.isNotEmpty()) {
+                    conn2.disconnect()
+                    return Triple(country, code, org)
+                }
+            }
+            conn2.disconnect()
+        } catch (_: Exception) {}
+
+        // 3. Второй резервный HTTPS-сервис: ipinfo.io
+        try {
+            val url3 = URL("https://ipinfo.io/$ip/json")
+            val conn3 = (url3.openConnection() as HttpsURLConnection).apply {
+                connectTimeout = 3500
+                readTimeout = 3500
+                setRequestProperty("User-Agent", "Mozilla/5.0")
+            }
+            if (conn3.responseCode == 200) {
+                val json = JSONObject(conn3.inputStream.bufferedReader().use { it.readText() })
+                val code = json.optString("country", "").uppercase()
+                val country = if (code.isNotEmpty()) countryCodeToRussianName(code) else ""
+                val org = json.optString("org", "")
+                if (country.isNotEmpty() || code.isNotEmpty()) {
+                    conn3.disconnect()
+                    return Triple(country, code, org)
+                }
+            }
+            conn3.disconnect()
+        } catch (_: Exception) {}
+
+        return Triple("Зарубежный прокси-узел", "", "")
     }
 
     private fun showGeminiRegionCheckDialog(returnToSettings: Boolean = false) {
@@ -742,7 +839,7 @@ class MainActivity : Activity() {
         }
 
         val verdictDetails = TextView(this).apply {
-            text = "Проверяем DNS-перехват gemini.google.com, наличие утечки IPv6 и статус капчи Google..."
+            text = "Проверяем DNS-перехват gemini.google.com, страну прокси-сервера, утечку IPv6 и статус капчи..."
             textSize = 12.5f
             setTextColor(Color.parseColor(textSubColorHex))
             setPadding(0, 10, 0, 0)
@@ -830,7 +927,7 @@ class MainActivity : Activity() {
             verdictTitle.text = "⏳ Выполняется проверка маршрутизации..."
             verdictTitle.setTextColor(Color.parseColor(accentColorHex))
             verdictCard.background = createRoundRect(bgCardHex, 24f, accentColorHex)
-            verdictDetails.text = "Опрашиваем DNS и сервер gemini.google.com..."
+            verdictDetails.text = "Опрашиваем DNS и определяем страну прокси по HTTPS..."
             switchNextBtn.visibility = View.GONE
 
             Thread {
@@ -841,10 +938,9 @@ class MainActivity : Activity() {
                 var ipv4ProxyIp = ""
                 var hasIpv6Leak = false
                 var isInterceptedByProxy = false
-                var proxyCountry = "Неизвестно"
+                var proxyCountry = "Зарубежный прокси-узел"
                 var proxyCountryCode = ""
                 var proxyOrg = ""
-                var httpStatus = -1
                 var isCaptchaDetected = false
                 var isRegionUnsupportedRedirect = false
 
@@ -858,33 +954,17 @@ class MainActivity : Activity() {
                         isInterceptedByProxy = !isDirectGoogleIp(ipv4ProxyIp)
                     }
 
-                    // Если возвращаются стандартные IPv6 адреса Google (2a00:1450:*) при включенном мобильном IPv6 — возможна утечка региона
                     if (ipv6List.any { it.startsWith("2a00:1450:") || it.startsWith("2607:f8b0:") }) {
                         hasIpv6Leak = true
                     }
 
-                    // Проверяем геолокацию IP, через который идет запрос к Gemini
                     if (ipv4ProxyIp.isNotEmpty()) {
-                        try {
-                            val geoUrl = URL("http://ip-api.com/json/$ipv4ProxyIp?fields=status,country,countryCode,org,isp&lang=ru")
-                            val conn = (geoUrl.openConnection() as HttpURLConnection).apply {
-                                connectTimeout = 3000
-                                readTimeout = 3000
-                            }
-                            if (conn.responseCode == 200) {
-                                val text = conn.inputStream.bufferedReader().use { it.readText() }
-                                val json = JSONObject(text)
-                                if (json.optString("status") == "success") {
-                                    proxyCountry = json.optString("country", "Неизвестно")
-                                    proxyCountryCode = json.optString("countryCode", "")
-                                    proxyOrg = json.optString("org", json.optString("isp", ""))
-                                }
-                            }
-                            conn.disconnect()
-                        } catch (_: Exception) {}
+                        val geo = lookupGeoIpHttps(ipv4ProxyIp)
+                        proxyCountry = geo.first
+                        proxyCountryCode = geo.second
+                        proxyOrg = geo.third
                     }
 
-                    // Прямая проверка ответа https://gemini.google.com/app
                     try {
                         val geminiUrl = URL("https://gemini.google.com/app")
                         val httpsConn = (geminiUrl.openConnection() as HttpsURLConnection).apply {
@@ -896,12 +976,15 @@ class MainActivity : Activity() {
                                 "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
                             )
                         }
-                        httpStatus = httpsConn.responseCode
+                        val httpStatus = httpsConn.responseCode
                         val locationHeader = httpsConn.getHeaderField("Location") ?: ""
 
-                        if (httpStatus == 429 || httpStatus == 503 || locationHeader.contains("/sorry/", ignoreCase = true) || locationHeader.contains("ipv4.google.com/sorry", ignoreCase = true)) {
+                        if (httpStatus == 429 || httpStatus == 503 ||
+                            locationHeader.contains("/sorry/", ignoreCase = true) ||
+                            locationHeader.contains("ipv4.google.com/sorry", ignoreCase = true)) {
                             isCaptchaDetected = true
-                        } else if (locationHeader.contains("faq", ignoreCase = true) || locationHeader.contains("unsupported", ignoreCase = true)) {
+                        } else if (locationHeader.contains("faq", ignoreCase = true) ||
+                                   locationHeader.contains("unsupported", ignoreCase = true)) {
                             isRegionUnsupportedRedirect = true
                         }
                         httpsConn.disconnect()
@@ -909,13 +992,17 @@ class MainActivity : Activity() {
 
                 } catch (_: Exception) {}
 
+                val formattedRegion = if (proxyCountryCode.isNotEmpty()) {
+                    "$proxyCountry ($proxyCountryCode)"
+                } else {
+                    proxyCountry
+                }
+
                 runOnUiThread {
                     val report = StringBuilder()
                     report.append("• Системный Private DNS: $dnsLabel\n")
                     report.append("• IP для gemini.google.com: ${if (ipv4ProxyIp.isEmpty()) "Нет ответа ❌" else ipv4ProxyIp}\n")
-                    if (proxyCountryCode.isNotEmpty()) {
-                        report.append("• Видимая страна для Gemini: $proxyCountry ($proxyCountryCode)\n")
-                    }
+                    report.append("• Видимый регион для Gemini: $formattedRegion\n")
                     if (proxyOrg.isNotEmpty()) {
                         report.append("• Узел маршрутизации: $proxyOrg\n")
                     }
@@ -927,7 +1014,7 @@ class MainActivity : Activity() {
                             verdictTitle.text = "❌ Реальное местоположение НЕ скрыто!"
                             verdictTitle.setTextColor(Color.parseColor("#FF5252"))
                             verdictCard.background = createRoundRect(if (isLightMode) "#FFEBEE" else "#1F1214", 24f, "#FF5252")
-                            report.append("\nПричина: Системный режим Private DNS отключен или стоит в режиме «Авто». Включите режим «Вкл» и выберите сервер (например, Comss.one или Malw.link).")
+                            report.append("\nПричина: Системный режим Private DNS отключен или стоит в режиме «Авто». Включите режим «Вкл» и выберите сервер (например, Comss.one, Malw.link или GeoHide).")
                         }
                         ipv4ProxyIp.isEmpty() -> {
                             vibrateClick(true)
@@ -950,12 +1037,12 @@ class MainActivity : Activity() {
                             verdictTitle.text = "⚠️ Местоположение скрыто, но IP перегружен (Капча)"
                             verdictTitle.setTextColor(Color.parseColor("#FFAB00"))
                             verdictCard.background = createRoundRect("#261A00", 24f, "#FFAB00")
-                            report.append("\nВаше реальное местоположение успешно скрыто ($proxyCountry), но Google временно выдал капчу «Подозрительный трафик» на IP $ipv4ProxyIp.\n\nРешение: Нажмите кнопку «Сменить DNS-сервер» ниже и очистите кэш браузера!")
+                            report.append("\nВаше реальное местоположение успешно скрыто ($formattedRegion), но Google временно выдал капчу «Подозрительный трафик» на IP $ipv4ProxyIp.\n\nРешение: Нажмите кнопку «Сменить DNS-сервер» ниже и очистите кэш браузера!")
                             switchNextBtn.visibility = View.VISIBLE
                         }
                         hasIpv6Leak -> {
                             vibrateClick(true)
-                            verdictTitle.text = "⚠️ IPv4 скрыт ($proxyCountry), но есть утечка IPv6!"
+                            verdictTitle.text = "⚠️ IPv4 скрыт ($formattedRegion), но есть утечка IPv6!"
                             verdictTitle.setTextColor(Color.parseColor("#FFAB00"))
                             verdictCard.background = createRoundRect("#261A00", 24f, "#FFAB00")
                             report.append("\nDNS-сервер подменяет IPv4, но пропускает прямой IPv6-адрес Google. Если Gemini пишет о недоступности региона — переключитесь на другой DNS-сервер и сбросьте кэш приложения Google.")
@@ -966,7 +1053,7 @@ class MainActivity : Activity() {
                             verdictTitle.text = "✅ Местоположение успешно скрыто!"
                             verdictTitle.setTextColor(Color.parseColor(accentColorHex))
                             verdictCard.background = createRoundRect(accentCardBgHex, 24f, accentColorHex)
-                            report.append("\nОтлично! Google Gemini видит ваше подключение из региона «$proxyCountry ($proxyCountryCode)». Региональных блокировок и капчи не обнаружено.")
+                            report.append("\nОтлично! Google Gemini видит ваше подключение из региона «$formattedRegion». Региональных блокировок и капчи не обнаружено.")
                         }
                     }
 
@@ -1000,7 +1087,6 @@ class MainActivity : Activity() {
     // =========================================================================
     private fun openAppStorageSettings(pkgName: String, appTitle: String) {
         try {
-            // Если Shizuku активен — предварительно останавливаем процесс приложения, чтобы сбросить активную сессию в ОЗУ
             if (isShizukuReady()) {
                 Thread {
                     runShizukuCommand(arrayOf("am", "force-stop", pkgName))
@@ -1026,7 +1112,6 @@ class MainActivity : Activity() {
             val currentMode = getActiveMode()
             val currentHost = getActiveHost()
 
-            // 1. Принудительный сброс системного DNS-кэша Android путём кратковременного переключения Private DNS
             if (hasPermission() && currentMode == "hostname" && currentHost.isNotEmpty()) {
                 try {
                     Settings.Global.putString(contentResolver, "private_dns_mode", "off")
@@ -1036,7 +1121,6 @@ class MainActivity : Activity() {
                 } catch (_: Exception) {}
             }
 
-            // 2. Если активен Shizuku — принудительно останавливаем фоновые процессы Gemini, приложения Google и браузеров
             var stoppedViaShizuku = false
             if (isShizukuReady()) {
                 val targetPackages = listOf(
@@ -1094,7 +1178,6 @@ class MainActivity : Activity() {
         hintBox.addView(hintTv)
         rootLayout.addView(hintBox)
 
-        // Кнопка мгновенного сброса сессии и DNS-кэша в 1 клик
         val quickFlushBtn = TextView(this).apply {
             text = "⚡ Сбросить DNS-кэш и фоновые сессии (1 клик)"
             textSize = 13.5f
@@ -1139,7 +1222,6 @@ class MainActivity : Activity() {
                 setOnClickListener {
                     vibrateClick()
                     if (index == 5) {
-                        // Проверяем альтернативные браузеры по очереди
                         val altPackages = listOf("com.brave.browser", "com.opera.browser", "org.mozilla.firefox", "com.microsoft.emmx")
                         var opened = false
                         for (altPkg in altPackages) {
