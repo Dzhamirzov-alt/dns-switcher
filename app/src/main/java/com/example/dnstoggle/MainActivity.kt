@@ -175,6 +175,8 @@ class MainActivity : Activity() {
         private const val REQ_EXPORT_FILE = 1001
         private const val REQ_IMPORT_FILE = 1002
         private const val REQ_SHIZUKU_PERMISSION = 1003
+        const val PRIORITY_GEMINI_HOST = "dns.dnsswitcherpro.com"
+        const val PRIORITY_GEMINI_NAME = "Gemini"
     }
 
     private val shizukuPermissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
@@ -189,17 +191,20 @@ class MainActivity : Activity() {
         }
     }
 
+    // 4 основных сервера по умолчанию при установке
     private val defaultServers = listOf(
+        DnsServer(PRIORITY_GEMINI_NAME, PRIORITY_GEMINI_HOST),
         DnsServer("Comss.one", "dns.comss.one"),
-        DnsServer("Мобильная -1", "comss.dns.controld.com"),
         DnsServer("📌 Malw.link", "dns.malw.link"),
-        DnsServer("🌍 GeoHide", "geohide.ru"),
-        DnsServer("Мобильная -2", "dns.astracat.network"),
-        DnsServer("Xbox", "xbox-dns.ru"),
-        DnsServer("Quad9", "dns.quad9.net")
+        DnsServer("🌍 GeoHide", "geohide.ru")
     )
 
+    // Все остальные серверы перенесены во вкладку «Популярные DNS-серверы»
     private val popularCatalog = listOf(
+        DnsServer("Мобильная -1 (ControlD)", "comss.dns.controld.com"),
+        DnsServer("Мобильная -2 (AstraCat)", "dns.astracat.network"),
+        DnsServer("Xbox DNS", "xbox-dns.ru"),
+        DnsServer("Quad9", "dns.quad9.net"),
         DnsServer("AdGuard DNS (Без рекламы)", "dns.adguard-dns.com"),
         DnsServer("AdGuard Семейный", "family.adguard-dns.com"),
         DnsServer("Cloudflare (Быстрый)", "one.one.one.one"),
@@ -208,13 +213,10 @@ class MainActivity : Activity() {
         DnsServer("Control D (Без рекламы)", "freedns.controld.com"),
         DnsServer("Mullvad DNS (Приватность)", "dns.mullvad.net"),
         DnsServer("CleanBrowsing (Фильтр)", "security-filter-dns.cleanbrowsing.org"),
+        DnsServer(PRIORITY_GEMINI_NAME, PRIORITY_GEMINI_HOST),
         DnsServer("Comss.one", "dns.comss.one"),
-        DnsServer("Мобильная -1", "comss.dns.controld.com"),
         DnsServer("📌 Malw.link", "dns.malw.link"),
-        DnsServer("🌍 GeoHide", "geohide.ru"),
-        DnsServer("Мобильная -2", "dns.astracat.network"),
-        DnsServer("Xbox", "xbox-dns.ru"),
-        DnsServer("Quad9", "dns.quad9.net")
+        DnsServer("🌍 GeoHide", "geohide.ru")
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -226,7 +228,45 @@ class MainActivity : Activity() {
         } catch (_: Throwable) {}
         loadServers()
         setupUI()
+        connectPriorityGeminiOnLaunch()
         registerSystemBackVibrate()
+    }
+
+    // Приоритетное подключение к серверу Gemini (dns.dnsswitcherpro.com) при запуске приложения
+    private fun connectPriorityGeminiOnLaunch() {
+        val priorityServer = serverList.firstOrNull {
+            it.host.equals(PRIORITY_GEMINI_HOST, ignoreCase = true) ||
+            it.name.equals(PRIORITY_GEMINI_NAME, ignoreCase = true)
+        } ?: DnsServer(PRIORITY_GEMINI_NAME, PRIORITY_GEMINI_HOST).also {
+            serverList.add(0, it)
+            saveServers()
+        }
+
+        prefs.edit().putString("last_active_host", priorityServer.host).apply()
+
+        if (hasPermission()) {
+            try {
+                Settings.Global.putString(contentResolver, "private_dns_mode", "hostname")
+                Settings.Global.putString(contentResolver, "private_dns_specifier", priorityServer.host)
+            } catch (_: Exception) {}
+        }
+    }
+
+    // Сортировка списка с сохранением приоритета сервера Gemini на 1-м месте
+    private fun sortServersWithGeminiPriority() {
+        serverList.sortWith(Comparator { a, b ->
+            val aIsGemini = a.host.equals(PRIORITY_GEMINI_HOST, ignoreCase = true) || a.name.equals(PRIORITY_GEMINI_NAME, ignoreCase = true)
+            val bIsGemini = b.host.equals(PRIORITY_GEMINI_HOST, ignoreCase = true) || b.name.equals(PRIORITY_GEMINI_NAME, ignoreCase = true)
+            when {
+                aIsGemini && !bIsGemini -> -1
+                !aIsGemini && bIsGemini -> 1
+                else -> {
+                    val pA = if (a.ping > 0) a.ping else Int.MAX_VALUE
+                    val pB = if (b.ping > 0) b.ping else Int.MAX_VALUE
+                    pA.compareTo(pB)
+                }
+            }
+        })
     }
 
     private fun registerSystemBackVibrate() {
@@ -417,11 +457,13 @@ class MainActivity : Activity() {
         Thread {
             val ok = runShizukuCommand(arrayOf("pm", "grant", packageName, android.Manifest.permission.WRITE_SECURE_SETTINGS))
             runOnUiThread {
-                refreshSystemState()
                 if (hasPermission() || ok) {
+                    connectPriorityGeminiOnLaunch()
+                    refreshSystemState()
                     vibrateClick(true)
-                    Toast.makeText(this, "⚡ Права успешно выданы через Shizuku!", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, "⚡ Права выданы! Подключен сервер Gemini", Toast.LENGTH_LONG).show()
                 } else {
+                    refreshSystemState()
                     Toast.makeText(this, "Не удалось выдать права через Shizuku", Toast.LENGTH_LONG).show()
                 }
             }
@@ -556,14 +598,11 @@ class MainActivity : Activity() {
                 rbOff.id -> applyDnsMode("off", null)
                 rbAuto.id -> applyDnsMode("opportunistic", null)
                 rbOn.id -> {
-                    val currentHost = getActiveHost()
-                    val lastSaved = prefs.getString("last_active_host", null)
-                    val target = when {
-                        currentHost.isNotEmpty() -> currentHost
-                        !lastSaved.isNullOrEmpty() -> lastSaved
-                        else -> if (serverList.isNotEmpty()) serverList[0].host else "dns.comss.one"
-                    }
-                    applyDnsMode("hostname", target)
+                    val geminiHost = serverList.firstOrNull {
+                        it.host.equals(PRIORITY_GEMINI_HOST, ignoreCase = true) ||
+                        it.name.equals(PRIORITY_GEMINI_NAME, ignoreCase = true)
+                    }?.host ?: PRIORITY_GEMINI_HOST
+                    applyDnsMode("hostname", geminiHost)
                 }
             }
         }
@@ -1637,7 +1676,7 @@ class MainActivity : Activity() {
 
         val options = listOf(
             Pair("➕ Добавить свой сервер", "Ручной ввод хоста и имени"),
-            Pair("📚 Популярные DNS-серверы", "Каталог проверенных серверов"),
+            Pair("📚 Популярные DNS-серверы", "Каталог дополнительных и резервных серверов"),
             Pair("📊 Ping Benchmark (Топ серверов)", "Анализ скорости и автовыбор лидера"),
             Pair("🕵️ Проверить защиту и регион Gemini", "Тест скрытия местоположения, IPv6 и капчи"),
             Pair("🧹 Очистить кэш Gemini и браузеров", "Сброс сессии, куки и региональной метки"),
@@ -1742,7 +1781,7 @@ class MainActivity : Activity() {
             val customOptions = listOf(
                 Pair("🎨 Выбор темы и акцента", "Цветовая палитра и янтарный стиль"),
                 Pair("☀️ Режим интерфейса", if (isLightMode) "Сейчас: Светлая тема" else "Сейчас: Темная тема"),
-                Pair("🔀 Автосортировка по пингу", if (isAutoSortOn) "Сейчас: Включена (быстрые сверху)" else "Сейчас: Отключена (фиксированный порядок)"),
+                Pair("🔀 Автосортировка по пингу", if (isAutoSortOn) "Сейчас: Включена (Gemini всегда #1)" else "Сейчас: Отключена (фиксированный порядок)"),
                 Pair("🎛️ Режим шторки", if (isSimpleToggle) "Сейчас: Обычный тумблер (Вкл/Выкл)" else "Сейчас: Циклический перебор"),
                 Pair("📳 Виброотклик при нажатиях", if (isHapticOn) "Сейчас: Включен" else "Сейчас: Отключен")
             )
@@ -1774,16 +1813,12 @@ class MainActivity : Activity() {
                                 val newSort = !isAutoSortOn
                                 prefs.edit().putBoolean("auto_sort_ping", newSort).apply()
                                 if (newSort) {
-                                    serverList.sortWith(Comparator { a, b ->
-                                        val pA = if (a.ping > 0) a.ping else Int.MAX_VALUE
-                                        val pB = if (b.ping > 0) b.ping else Int.MAX_VALUE
-                                        pA.compareTo(pB)
-                                    })
+                                    sortServersWithGeminiPriority()
                                     saveServers()
                                     renderServerList()
                                 }
                                 renderCustomizationOptions()
-                                val msg = if (newSort) "Автосортировка включена" else "Порядок серверов зафиксирован"
+                                val msg = if (newSort) "Автосортировка включена (Gemini #1)" else "Порядок серверов зафиксирован"
                                 Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
                             }
                             3 -> {
@@ -1978,7 +2013,7 @@ class MainActivity : Activity() {
         rootLayout.addView(scrollView)
 
         val connectBestBtn = TextView(this).apply {
-            text = "⚡ Автовыбор (Подключить лучший #1)"
+            text = "⚡ Автовыбор (Приоритет Gemini / Лучший #1)"
             textSize = 14f
             setTextColor(Color.parseColor(accentColorHex))
             typeface = Typeface.DEFAULT_BOLD
@@ -1989,11 +2024,14 @@ class MainActivity : Activity() {
             layoutParams = params
             setOnClickListener {
                 vibrateClick(true)
-                val best = serverList.filter { it.ping > 0 }.minByOrNull { it.ping }
+                val geminiSrv = serverList.firstOrNull {
+                    (it.host.equals(PRIORITY_GEMINI_HOST, ignoreCase = true) || it.name.equals(PRIORITY_GEMINI_NAME, ignoreCase = true)) && it.ping > 0
+                }
+                val best = geminiSrv ?: serverList.filter { it.ping > 0 }.minByOrNull { it.ping }
                 if (best != null) {
                     benchDialog?.dismiss()
                     applyDnsMode("hostname", best.host)
-                    Toast.makeText(this@MainActivity, "⚡ Подключен лидер: ${best.name} (${best.ping} мс)", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, "⚡ Подключен: ${best.name} (${best.ping} мс)", Toast.LENGTH_LONG).show()
                 } else {
                     Toast.makeText(this@MainActivity, "⏳ Запускаем экспресс-тест для выбора лидера...", Toast.LENGTH_SHORT).show()
                     benchDialog?.dismiss()
@@ -2044,11 +2082,7 @@ class MainActivity : Activity() {
 
                     runOnUiThread {
                         if (prefs.getBoolean("auto_sort_ping", true)) {
-                            serverList.sortWith(Comparator { a, b ->
-                                val pA = if (a.ping > 0) a.ping else Int.MAX_VALUE
-                                val pB = if (b.ping > 0) b.ping else Int.MAX_VALUE
-                                pA.compareTo(pB)
-                            })
+                            sortServersWithGeminiPriority()
                         }
                         saveServers()
                         text = "🔄 Запустить тест скорости"
@@ -2460,11 +2494,7 @@ class MainActivity : Activity() {
 
             runOnUiThread {
                 if (prefs.getBoolean("auto_sort_ping", true)) {
-                    serverList.sortWith(Comparator { a, b ->
-                        val pA = if (a.ping > 0) a.ping else Int.MAX_VALUE
-                        val pB = if (b.ping > 0) b.ping else Int.MAX_VALUE
-                        pA.compareTo(pB)
-                    })
+                    sortServersWithGeminiPriority()
                 }
                 saveServers()
                 val workingCount = serverList.count { it.ping > 0 }
@@ -2473,7 +2503,10 @@ class MainActivity : Activity() {
                 renderServerList()
 
                 if (autoConnectBest) {
-                    val best = serverList.filter { it.ping > 0 }.minByOrNull { it.ping }
+                    val geminiSrv = serverList.firstOrNull {
+                        (it.host.equals(PRIORITY_GEMINI_HOST, ignoreCase = true) || it.name.equals(PRIORITY_GEMINI_NAME, ignoreCase = true)) && it.ping > 0
+                    }
+                    val best = geminiSrv ?: serverList.filter { it.ping > 0 }.minByOrNull { it.ping }
                     if (best != null) {
                         vibrateClick(true)
                         applyDnsMode("hostname", best.host)
@@ -2505,7 +2538,7 @@ class MainActivity : Activity() {
         rootLayout.addView(createDialogHeaderTitle(if (isEdit) "✏️ Редактировать сервер" else "➕ Добавить свой сервер"))
 
         val nameInput = EditText(this).apply {
-            hint = "Название (например, Comss.one)"
+            hint = "Название (например, Gemini)"
             setText(current?.name ?: "")
             setTextColor(Color.parseColor(textMainColorHex))
             setHintTextColor(Color.parseColor(textSubColorHex))
@@ -2517,7 +2550,7 @@ class MainActivity : Activity() {
         }
 
         val hostInput = EditText(this).apply {
-            hint = "Адрес хоста (например, dns.comss.one)"
+            hint = "Адрес хоста (например, dns.dnsswitcherpro.com)"
             inputType = InputType.TYPE_TEXT_VARIATION_URI
             setText(current?.host ?: "")
             setTextColor(Color.parseColor(textMainColorHex))
@@ -2849,7 +2882,7 @@ class MainActivity : Activity() {
             "📂 Загрузить бэкап из файла (.json)",
             "📤 Скопировать JSON в буфер",
             "📥 Вставить JSON из буфера",
-            "🔄 Сбросить к стандартным 7 серверам"
+            "🔄 Сбросить к стандартным 4 серверам"
         )
 
         for ((which, label) in options.withIndex()) {
@@ -2883,8 +2916,10 @@ class MainActivity : Activity() {
                                 serverList.add(DnsServer(d.name, d.host))
                             }
                             saveServers()
+                            connectPriorityGeminiOnLaunch()
+                            refreshSystemState()
                             checkNetworkAndTestAll()
-                            Toast.makeText(this@MainActivity, "Список сброшен!", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this@MainActivity, "Восстановлены 4 базовых сервера!", Toast.LENGTH_SHORT).show()
                         }
                     }
                 }
@@ -3206,24 +3241,33 @@ class MainActivity : Activity() {
 
     private fun loadServers() {
         serverList.clear()
+        val migratedV4 = prefs.getBoolean("migrated_4_servers_v1", false)
         val raw = prefs.getString("servers_json", null)
-        if (raw.isNullOrEmpty()) {
+
+        if (raw.isNullOrEmpty() || !migratedV4) {
             for (d in defaultServers) {
                 serverList.add(DnsServer(d.name, d.host))
             }
+            prefs.edit().putBoolean("migrated_4_servers_v1", true).apply()
             saveServers()
             return
         }
+
         try {
             val arr = JSONArray(raw)
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
                 serverList.add(DnsServer(obj.getString("name"), obj.getString("host")))
             }
+            if (serverList.none { it.host.equals(PRIORITY_GEMINI_HOST, ignoreCase = true) }) {
+                serverList.add(0, DnsServer(PRIORITY_GEMINI_NAME, PRIORITY_GEMINI_HOST))
+                saveServers()
+            }
         } catch (_: Exception) {
             for (d in defaultServers) {
                 serverList.add(DnsServer(d.name, d.host))
             }
+            saveServers()
         }
     }
 
@@ -3270,7 +3314,7 @@ class DnsTileService : TileService() {
             } catch (_: Exception) {}
         }
         if (hosts.isEmpty()) {
-            hosts.add(Pair("Comss.one", "dns.comss.one"))
+            hosts.add(Pair(MainActivity.PRIORITY_GEMINI_NAME, MainActivity.PRIORITY_GEMINI_HOST))
         }
 
         val currentMode = Settings.Global.getString(contentResolver, "private_dns_mode") ?: "off"
@@ -3278,14 +3322,10 @@ class DnsTileService : TileService() {
 
         if (isSimpleToggle) {
             if (currentMode == "off") {
-                val savedHost = prefs.getString("last_active_host", null)
-                val targetHost = when {
-                    !savedHost.isNullOrEmpty() -> savedHost
-                    currentHost.isNotEmpty() -> currentHost
-                    else -> hosts[0].second
-                }
+                val targetHost = MainActivity.PRIORITY_GEMINI_HOST
                 Settings.Global.putString(contentResolver, "private_dns_mode", "hostname")
                 Settings.Global.putString(contentResolver, "private_dns_specifier", targetHost)
+                prefs.edit().putString("last_active_host", targetHost).apply()
             } else {
                 if (currentMode == "hostname" && currentHost.isNotEmpty()) {
                     prefs.edit().putString("last_active_host", currentHost).apply()
