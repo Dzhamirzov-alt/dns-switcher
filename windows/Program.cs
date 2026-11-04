@@ -11,6 +11,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -54,8 +55,9 @@ namespace DnsSwitcherPro
         public int DpiStrategyProfile { get; set; } = 1;
         public bool StartWithWindows { get; set; } = true;
         public bool FirstRunCompleted { get; set; } = false;
-        public string CurrentMode { get; set; } = "off";
-        public string LastActiveHost { get; set; } = "dns.comss.one";
+        public bool Migrated4ServersV1 { get; set; } = false;
+        public string CurrentMode { get; set; } = "on";
+        public string LastActiveHost { get; set; } = "dns.dnsswitcherpro.com";
         public List<DnsServer> Servers { get; set; } = new();
     }
 
@@ -73,6 +75,10 @@ namespace DnsSwitcherPro
 
     public class MainWindow : Window
     {
+        public const string PriorityGeminiHost = "dns.dnsswitcherpro.com";
+        public const string PriorityGeminiName = "Gemini";
+        public const string PriorityGeminiIp = "45.86.68.140";
+
         private AppConfig config = new();
         private readonly string configPath;
         private readonly bool launchMinimized;
@@ -138,6 +144,7 @@ namespace DnsSwitcherPro
 
         private readonly Dictionary<string, string[]> knownIps = new(StringComparer.OrdinalIgnoreCase)
         {
+            { PriorityGeminiHost, new[] { PriorityGeminiIp } },
             { "dns.comss.one", new[] { "83.220.169.155", "212.109.195.93" } },
             { "comss.dns.controld.com", new[] { "76.76.2.22", "76.76.10.22" } },
             { "dns.malw.link", new[] { "193.23.209.189", "45.95.233.23" } },
@@ -155,19 +162,22 @@ namespace DnsSwitcherPro
             { "security-filter-dns.cleanbrowsing.org", new[] { "185.228.168.9", "185.228.169.9" } }
         };
 
+        // 4 основных сервера по умолчанию при установке
         private readonly List<DnsServer> defaultServers = new()
         {
+            new DnsServer { name = PriorityGeminiName, host = PriorityGeminiHost },
             new DnsServer { name = "Comss.one", host = "dns.comss.one" },
-            new DnsServer { name = "Мобильная -1", host = "comss.dns.controld.com" },
             new DnsServer { name = "📌 Malw.link", host = "dns.malw.link" },
-            new DnsServer { name = "🌍 GeoHide", host = "geohide.ru" },
-            new DnsServer { name = "Мобильная -2", host = "dns.astracat.network" },
-            new DnsServer { name = "Xbox", host = "xbox-dns.ru" },
-            new DnsServer { name = "Quad9", host = "dns.quad9.net" }
+            new DnsServer { name = "🌍 GeoHide", host = "geohide.ru" }
         };
 
+        // Все остальные серверы перенесены во вкладку «Популярные DNS-серверы»
         private readonly List<DnsServer> popularCatalog = new()
         {
+            new DnsServer { name = "Мобильная -1 (ControlD)", host = "comss.dns.controld.com" },
+            new DnsServer { name = "Мобильная -2 (AstraCat)", host = "dns.astracat.network" },
+            new DnsServer { name = "Xbox DNS", host = "xbox-dns.ru" },
+            new DnsServer { name = "Quad9", host = "dns.quad9.net" },
             new DnsServer { name = "AdGuard DNS (Без рекламы)", host = "dns.adguard-dns.com" },
             new DnsServer { name = "AdGuard Семейный", host = "family.adguard-dns.com" },
             new DnsServer { name = "Cloudflare (Быстрый)", host = "one.one.one.one" },
@@ -176,13 +186,10 @@ namespace DnsSwitcherPro
             new DnsServer { name = "Control D (Без рекламы)", host = "freedns.controld.com" },
             new DnsServer { name = "Mullvad DNS (Приватность)", host = "dns.mullvad.net" },
             new DnsServer { name = "CleanBrowsing (Фильтр)", host = "security-filter-dns.cleanbrowsing.org" },
+            new DnsServer { name = PriorityGeminiName, host = PriorityGeminiHost },
             new DnsServer { name = "Comss.one", host = "dns.comss.one" },
-            new DnsServer { name = "Мобильная -1", host = "comss.dns.controld.com" },
             new DnsServer { name = "📌 Malw.link", host = "dns.malw.link" },
-            new DnsServer { name = "🌍 GeoHide", host = "geohide.ru" },
-            new DnsServer { name = "Мобильная -2", host = "dns.astracat.network" },
-            new DnsServer { name = "Xbox", host = "xbox-dns.ru" },
-            new DnsServer { name = "Quad9", host = "dns.quad9.net" }
+            new DnsServer { name = "🌍 GeoHide", host = "geohide.ru" }
         };
 
         public MainWindow(bool startMinimized)
@@ -251,7 +258,7 @@ namespace DnsSwitcherPro
 
                 await Task.Run(() => EnforceIpv6Policy());
 
-                DetectInitialSystemMode();
+                ConnectPriorityGeminiOnLaunch();
                 RefreshSystemState();
                 CheckNetworkAndTestAll();
 
@@ -264,7 +271,7 @@ namespace DnsSwitcherPro
                     trayIcon.ShowBalloonTip(
                         2000,
                         "⚡ DNS Switcher Pro активен",
-                        "Защита DNS, IPv4 Only и обход DPI работают в фоновом режиме.",
+                        $"Подключен приоритетный сервер {PriorityGeminiName} ({PriorityGeminiHost}).",
                         Forms.ToolTipIcon.Info);
                 }
             };
@@ -281,8 +288,36 @@ namespace DnsSwitcherPro
             };
         }
 
+        // Приоритетное подключение к серверу Gemini (dns.dnsswitcherpro.com) при запуске приложения
+        private void ConnectPriorityGeminiOnLaunch()
+        {
+            var prioritySrv = serverList.FirstOrDefault(s =>
+                s.host.Equals(PriorityGeminiHost, StringComparison.OrdinalIgnoreCase) ||
+                s.name.Equals(PriorityGeminiName, StringComparison.OrdinalIgnoreCase));
+
+            if (prioritySrv == null)
+            {
+                prioritySrv = new DnsServer { name = PriorityGeminiName, host = PriorityGeminiHost };
+                serverList.Insert(0, prioritySrv);
+                SaveConfig();
+            }
+
+            ApplyWindowsDnsServer(prioritySrv.host, silentError: true);
+        }
+
+        // Сортировка списка с закреплением сервера Gemini всегда на 1-м месте
+        private void SortServersWithGeminiPriority()
+        {
+            serverList = serverList
+                .OrderBy(s =>
+                    (s.host.Equals(PriorityGeminiHost, StringComparison.OrdinalIgnoreCase) ||
+                     s.name.Equals(PriorityGeminiName, StringComparison.OrdinalIgnoreCase)) ? 0 : 1)
+                .ThenBy(s => s.ping > 0 ? s.ping : int.MaxValue)
+                .ToList();
+        }
+
         // =========================================================================
-        // ДИАГНОСТИКА СКРЫТИЯ МЕСТОПОЛОЖЕНИЯ ДЛЯ GOOGLE GEMINI (WINDOWS)
+        // ДИАГНОСТИКА СКРЫТИЯ МЕСТОПОЛОЖЕНИЯ ДЛЯ GOOGLE GEMINI (HTTPS КАСКАД)
         // =========================================================================
         private bool IsDirectGoogleIp(string ip)
         {
@@ -293,6 +328,144 @@ namespace DnsSwitcherPro
                 "64.233.", "209.85.", "216.239."
             };
             return directPrefixes.Any(p => ip.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private string CountryCodeToRussianName(string code)
+        {
+            return code.ToUpperInvariant() switch
+            {
+                "NL" => "Нидерланды",
+                "DE" => "Германия",
+                "FI" => "Финляндия",
+                "US" => "США",
+                "GB" or "UK" => "Великобритания",
+                "FR" => "Франция",
+                "SE" => "Швеция",
+                "PL" => "Польша",
+                "LV" => "Латвия",
+                "LT" => "Литва",
+                "EE" => "Эстония",
+                "CZ" => "Чехия",
+                "AT" => "Австрия",
+                "CH" => "Швейцария",
+                "IT" => "Италия",
+                "ES" => "Испания",
+                "TR" => "Турция",
+                "KZ" => "Казахстан",
+                "SG" => "Сингапур",
+                "JP" => "Япония",
+                "CA" => "Канада",
+                "IE" => "Ирландия",
+                "RO" => "Румыния",
+                "BG" => "Болгария",
+                "UA" => "Украина",
+                "RU" => "Россия",
+                "BY" => "Беларусь",
+                _ => code.ToUpperInvariant()
+            };
+        }
+
+        private async Task<(string Country, string Code, string Org)> LookupGeoIpHttpsAsync(HttpClient http, string ip)
+        {
+            string targetSegment = string.IsNullOrWhiteSpace(ip) ? "" : ip.Trim();
+
+            // 1. Основной HTTPS-сервис: ipwho.is
+            try
+            {
+                string json1 = await http.GetStringAsync($"https://ipwho.is/{targetSegment}?lang=ru");
+                var node1 = JsonNode.Parse(json1);
+                if (node1 != null && (node1["success"]?.GetValue<bool>() ?? true))
+                {
+                    string code = (node1["country_code"]?.GetValue<string>() ?? "").ToUpperInvariant();
+                    string country = node1["country"]?.GetValue<string>() ?? "";
+                    if (string.IsNullOrEmpty(country) && !string.IsNullOrEmpty(code))
+                        country = CountryCodeToRussianName(code);
+
+                    var connObj = node1["connection"];
+                    string org = connObj?["org"]?.GetValue<string>() ?? "";
+                    if (string.IsNullOrEmpty(org))
+                        org = connObj?["isp"]?.GetValue<string>() ?? "";
+
+                    if (!string.IsNullOrEmpty(country) || !string.IsNullOrEmpty(code))
+                        return (country, code, org);
+                }
+            }
+            catch { }
+
+            // 2. Резервный HTTPS-сервис: get.geojs.io
+            try
+            {
+                string url2 = string.IsNullOrEmpty(targetSegment)
+                    ? "https://get.geojs.io/v1/ip/geo.json"
+                    : $"https://get.geojs.io/v1/ip/geo/{targetSegment}.json";
+                string json2 = await http.GetStringAsync(url2);
+                var node2 = JsonNode.Parse(json2);
+                if (node2 != null)
+                {
+                    string code = (node2["country_code"]?.GetValue<string>() ?? "").ToUpperInvariant();
+                    string country = !string.IsNullOrEmpty(code)
+                        ? CountryCodeToRussianName(code)
+                        : (node2["country"]?.GetValue<string>() ?? "");
+                    string org = node2["organization_name"]?.GetValue<string>()
+                                 ?? node2["organization"]?.GetValue<string>() ?? "";
+
+                    if (!string.IsNullOrEmpty(country) || !string.IsNullOrEmpty(code))
+                        return (country, code, org);
+                }
+            }
+            catch { }
+
+            // 3. Второй резервный HTTPS-сервис: ipinfo.io
+            try
+            {
+                string url3 = string.IsNullOrEmpty(targetSegment)
+                    ? "https://ipinfo.io/json"
+                    : $"https://ipinfo.io/{targetSegment}/json";
+                string json3 = await http.GetStringAsync(url3);
+                var node3 = JsonNode.Parse(json3);
+                if (node3 != null)
+                {
+                    string code = (node3["country"]?.GetValue<string>() ?? "").ToUpperInvariant();
+                    string country = !string.IsNullOrEmpty(code) ? CountryCodeToRussianName(code) : "";
+                    string org = node3["org"]?.GetValue<string>() ?? "";
+
+                    if (!string.IsNullOrEmpty(country) || !string.IsNullOrEmpty(code))
+                        return (country, code, org);
+                }
+            }
+            catch { }
+
+            return ("Неизвестно", "", "");
+        }
+
+        private string ExtractGoogleSeenCountry(string html)
+        {
+            if (string.IsNullOrEmpty(html)) return "";
+            try
+            {
+                string[] patterns = new[]
+                {
+                    "\"country_code\"\\s*:\\s*\"([A-Z]{2})\"",
+                    "\"gl\"\\s*:\\s*\"([A-Z]{2})\"",
+                    "\"X3N0Bf\"\\s*:\\s*\"([A-Z]{2})\"",
+                    "\\\\?\"(?:en|ru)[-_]([A-Z]{2})\\\\?\""
+                };
+
+                foreach (var pat in patterns)
+                {
+                    var m = Regex.Match(html, pat);
+                    if (m.Success && m.Groups.Count > 1)
+                    {
+                        string code = m.Groups[1].Value.ToUpperInvariant();
+                        if (code.Length == 2)
+                        {
+                            return $"{CountryCodeToRussianName(code)} ({code})";
+                        }
+                    }
+                }
+            }
+            catch { }
+            return "";
         }
 
         private void ShowGeminiRegionCheckDialog(bool returnToSettings = false, bool returnToNetworkSettings = false)
@@ -317,7 +490,7 @@ namespace DnsSwitcherPro
 
             var verdictDetails = new TextBlock
             {
-                Text = "Проверяем перехват домена gemini.google.com, геолокацию прокси-узла, защиту IPv6 и статус капчи Google...",
+                Text = "Сбрасываем локальный кэш и опрашиваем выбранный DNS-сервер...",
                 FontSize = 12,
                 Foreground = BrushFromHex(textSubColorHex),
                 Margin = new Thickness(0, 8, 0, 0),
@@ -341,7 +514,7 @@ namespace DnsSwitcherPro
             root.Children.Add(verdictCard);
 
             Border switchNextBtn = null!;
-            switchNextBtn = CreateDialogButton("🔄 Сменить DNS-сервер (Обойти капчу / блок)", "#FFAB00", () =>
+            switchNextBtn = CreateDialogButton("🔄 Сменить DNS-сервер", "#FFAB00", () =>
             {
                 string currentHost = config.LastActiveHost;
                 var candidates = serverList
@@ -365,19 +538,22 @@ namespace DnsSwitcherPro
                 verdictTitle.Foreground = BrushFromHex(accentColorHex);
                 verdictCard.BorderBrush = BrushFromHex(accentColorHex);
                 verdictCard.Background = BrushFromHex(bgCardHex);
-                verdictDetails.Text = "Опрашиваем системный DNS и сервер gemini.google.com...";
+                verdictDetails.Text = "Опрашиваем активный DNS-сервер в обход локального кэша...";
                 switchNextBtn.Visibility = Visibility.Collapsed;
 
                 string mode = config.CurrentMode;
-                string activeHost = config.LastActiveHost;
+                string activeHost = (config.LastActiveHost ?? "").Trim();
                 string dnsLabel = mode == "on" && !string.IsNullOrEmpty(activeHost) ? activeHost : $"Выключен ({mode})";
 
-                string ipv4ProxyIp = "";
+                string resolvedGeminiIp = "";
+                string activeDnsServerIp = "";
                 bool hasIpv6Leak = !config.BlockIpv6;
                 bool isInterceptedByProxy = false;
-                string proxyCountry = "Неизвестно";
-                string proxyCountryCode = "";
-                string proxyOrg = "";
+                bool isMatchedCustomVps = false;
+                string nodeCountry = "Неизвестно";
+                string nodeCountryCode = "";
+                string nodeOrg = "";
+                string googleSeenRegion = "";
                 bool isCaptchaDetected = false;
                 bool isRegionUnsupportedRedirect = false;
                 var browserConflicts = CheckBrowserDnsConflicts();
@@ -387,6 +563,17 @@ namespace DnsSwitcherPro
                     try
                     {
                         RunCommand("ipconfig /flushdns");
+
+                        if (mode == "on" && !string.IsNullOrEmpty(activeHost))
+                        {
+                            try
+                            {
+                                var dnsIps = ResolveHostToIpv4(activeHost);
+                                if (dnsIps.Length > 0) activeDnsServerIp = dnsIps[0];
+                            }
+                            catch { }
+                        }
+
                         var addresses = Dns.GetHostAddresses("gemini.google.com");
                         var ipv4List = addresses
                             .Where(a => a.AddressFamily == AddressFamily.InterNetwork)
@@ -401,8 +588,18 @@ namespace DnsSwitcherPro
 
                         if (ipv4List.Count > 0)
                         {
-                            ipv4ProxyIp = ipv4List[0];
-                            isInterceptedByProxy = !IsDirectGoogleIp(ipv4ProxyIp);
+                            resolvedGeminiIp = ipv4List[0];
+                            isInterceptedByProxy = !IsDirectGoogleIp(resolvedGeminiIp);
+                        }
+
+                        var trustedCustomVpsIps = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { PriorityGeminiIp };
+                        if (!string.IsNullOrEmpty(activeDnsServerIp))
+                            trustedCustomVpsIps.Add(activeDnsServerIp);
+
+                        if (!string.IsNullOrEmpty(resolvedGeminiIp) && trustedCustomVpsIps.Contains(resolvedGeminiIp))
+                        {
+                            isMatchedCustomVps = true;
+                            isInterceptedByProxy = true;
                         }
 
                         if (ipv6List.Any(ip => ip.StartsWith("2a00:1450:", StringComparison.OrdinalIgnoreCase) ||
@@ -412,30 +609,19 @@ namespace DnsSwitcherPro
                         }
 
                         using var handler = new HttpClientHandler { AllowAutoRedirect = false };
-                        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromMilliseconds(4500) };
+                        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromMilliseconds(5000) };
                         http.DefaultRequestHeaders.UserAgent.ParseAdd(
                             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
 
-                        if (!string.IsNullOrEmpty(ipv4ProxyIp))
-                        {
-                            try
-                            {
-                                string geoJson = await http.GetStringAsync(
-                                    $"http://ip-api.com/json/{ipv4ProxyIp}?fields=status,country,countryCode,org,isp&lang=ru");
-                                var node = JsonNode.Parse(geoJson);
-                                if (node?["status"]?.GetValue<string>() == "success")
-                                {
-                                    proxyCountry = node["country"]?.GetValue<string>() ?? "Неизвестно";
-                                    proxyCountryCode = node["countryCode"]?.GetValue<string>() ?? "";
-                                    proxyOrg = node["org"]?.GetValue<string>() ?? node["isp"]?.GetValue<string>() ?? "";
-                                }
-                            }
-                            catch { }
-                        }
+                        string ipToCheckGeo = isInterceptedByProxy && !string.IsNullOrEmpty(resolvedGeminiIp) ? resolvedGeminiIp : "";
+                        var geo = await LookupGeoIpHttpsAsync(http, ipToCheckGeo);
+                        nodeCountry = geo.Country;
+                        nodeCountryCode = geo.Code;
+                        nodeOrg = geo.Org;
 
                         try
                         {
-                            using var resp = await http.GetAsync("https://gemini.google.com/app");
+                            using var resp = await http.GetAsync("https://gemini.google.com/app?hl=ru");
                             int code = (int)resp.StatusCode;
                             string loc = resp.Headers.Location?.ToString() ?? "";
 
@@ -450,22 +636,63 @@ namespace DnsSwitcherPro
                             {
                                 isRegionUnsupportedRedirect = true;
                             }
+                            else if (code == 200)
+                            {
+                                string htmlChunk = await resp.Content.ReadAsStringAsync();
+                                if (htmlChunk.Contains("country is not supported", StringComparison.OrdinalIgnoreCase) ||
+                                    htmlChunk.Contains("не поддерживается в вашей стране", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    isRegionUnsupportedRedirect = true;
+                                }
+                                else
+                                {
+                                    googleSeenRegion = ExtractGoogleSeenCountry(htmlChunk);
+                                }
+                            }
                         }
                         catch { }
                     }
                     catch { }
                 });
 
+                bool isTransitMultiHopProxy = isInterceptedByProxy &&
+                    (nodeCountryCode.Equals("RU", StringComparison.OrdinalIgnoreCase) ||
+                     nodeCountryCode.Equals("BY", StringComparison.OrdinalIgnoreCase)) &&
+                    !isRegionUnsupportedRedirect;
+
+                string formattedNodeRegion = !string.IsNullOrEmpty(nodeCountryCode)
+                    ? $"{nodeCountry} ({nodeCountryCode})"
+                    : nodeCountry;
+
+                string finalVisibleRegion = !isInterceptedByProxy
+                    ? $"{formattedNodeRegion} (Ваш реальный регион — без прокси)"
+                    : !string.IsNullOrEmpty(googleSeenRegion)
+                        ? googleSeenRegion
+                        : isTransitMultiHopProxy
+                            ? $"США / Европа (Туннель через {nodeCountryCode})"
+                            : formattedNodeRegion;
+
                 var report = new StringBuilder();
-                report.AppendLine($"• Системный DNS: {dnsLabel}");
-                report.AppendLine($"• IP для gemini.google.com: {(string.IsNullOrEmpty(ipv4ProxyIp) ? "Нет ответа ❌" : ipv4ProxyIp)}");
-                if (!string.IsNullOrEmpty(proxyCountryCode))
+                report.AppendLine($"• Активный DNS: {dnsLabel}");
+                if (!string.IsNullOrEmpty(activeDnsServerIp))
                 {
-                    report.AppendLine($"• Видимая страна для Gemini: {proxyCountry} ({proxyCountryCode})");
+                    report.AppendLine($"• IP вашего DNS-сервера: {activeDnsServerIp}");
                 }
-                if (!string.IsNullOrEmpty(proxyOrg))
+
+                if (isInterceptedByProxy)
                 {
-                    report.AppendLine($"• Узел маршрутизации: {proxyOrg}");
+                    string vpsBadge = isMatchedCustomVps ? " (Ваш личный VPS ✅)" : "";
+                    report.AppendLine($"• Прокси-IP для Gemini: {resolvedGeminiIp}{vpsBadge}");
+                }
+                else
+                {
+                    report.AppendLine($"• Ответ DNS для Gemini: {(string.IsNullOrEmpty(resolvedGeminiIp) ? "Нет ответа ❌" : $"{resolvedGeminiIp} (Прямой IP Google — без подмены!)")}");
+                }
+
+                report.AppendLine($"• Видимый регион для Gemini: {finalVisibleRegion}");
+                if (!string.IsNullOrEmpty(nodeOrg) && isInterceptedByProxy)
+                {
+                    report.AppendLine($"• Оператор прокси-узла: {nodeOrg}");
                 }
                 report.AppendLine($"• Защита от утечки IPv6: {(hasIpv6Leak ? "⚠️ IPv6 включён (риск утечки региона)" : "✅ Защищено (IPv4 Only)")}");
                 report.AppendLine($"• Браузеры: {(browserConflicts.Count > 0 ? $"⚠️ Конфликт в {string.Join(", ", browserConflicts.Select(c => c.BrowserName))}" : "✅ Подчиняются системе")}");
@@ -476,28 +703,41 @@ namespace DnsSwitcherPro
                     verdictTitle.Foreground = BrushFromHex("#FF5252");
                     verdictCard.BorderBrush = BrushFromHex("#FF5252");
                     verdictCard.Background = BrushFromHex(config.LightMode ? "#FFEBEE" : "#1F1214");
-                    report.Append("\nПричина: Системный режим DNS отключен или стоит в режиме «Авто». Включите режим «Вкл» и выберите сервер (например, Comss.one или Malw.link).");
+                    report.Append("\nПричина: Системный режим DNS отключен или стоит в режиме «Авто». Включите режим «Вкл».");
                     switchNextBtn.Visibility = Visibility.Visible;
                 }
-                else if (string.IsNullOrEmpty(ipv4ProxyIp))
+                else if (string.IsNullOrEmpty(resolvedGeminiIp))
                 {
-                    verdictTitle.Text = "⚠️ Нет ответа от текущего DNS-сервера";
+                    verdictTitle.Text = "⚠️ Ошибка соединения с DNS-сервером";
                     verdictTitle.Foreground = BrushFromHex("#FF5252");
                     verdictCard.BorderBrush = BrushFromHex("#FF5252");
                     verdictCard.Background = BrushFromHex(config.LightMode ? "#FFEBEE" : "#1F1214");
-                    report.Append("\nНе удалось разрешить домен gemini.google.com. Нажмите кнопку ниже для переключения на другой сервер.");
+                    report.Append($"\nСервер {activeHost} не смог разрешить домен gemini.google.com.");
                     switchNextBtn.Visibility = Visibility.Visible;
                 }
-                else if (!isInterceptedByProxy ||
-                         proxyCountryCode.Equals("RU", StringComparison.OrdinalIgnoreCase) ||
-                         proxyCountryCode.Equals("BY", StringComparison.OrdinalIgnoreCase) ||
-                         isRegionUnsupportedRedirect)
+                else if (!isInterceptedByProxy)
                 {
-                    verdictTitle.Text = "❌ Местоположение НЕ скрыто от Gemini!";
+                    verdictTitle.Text = "❌ DNS не подменяет IP для Gemini!";
                     verdictTitle.Foreground = BrushFromHex("#FF5252");
                     verdictCard.BorderBrush = BrushFromHex("#FF5252");
                     verdictCard.Background = BrushFromHex(config.LightMode ? "#FFEBEE" : "#1F1214");
-                    report.Append($"\nПричина: Сервер ({activeHost}) направляет трафик напрямую в Google без маскировки региона. Переключитесь на Comss.one, Malw.link или GeoHide!");
+                    if (activeDnsServerIp == PriorityGeminiIp || activeHost.Contains("dnsswitcherpro", StringComparison.OrdinalIgnoreCase))
+                    {
+                        report.Append($"\nПричина: Ваш сервер {activeHost} ({activeDnsServerIp}) вернул прямой IP Google ({resolvedGeminiIp}) вместо IP прокси!\n\nКак исправить в AdGuard Home:\nЗамените правила @@||gemini.google.com^ на правило перезаписи:\n||gemini.google.com^$dnsrewrite=NOERROR;A;{activeDnsServerIp}");
+                    }
+                    else
+                    {
+                        report.Append($"\nПричина: Текущий DNS ({activeHost}) возвращает прямой IP Google ({resolvedGeminiIp}) без маскировки региона.");
+                    }
+                    switchNextBtn.Visibility = Visibility.Visible;
+                }
+                else if (isRegionUnsupportedRedirect)
+                {
+                    verdictTitle.Text = "❌ Прокси-узел не поддерживает регион Gemini!";
+                    verdictTitle.Foreground = BrushFromHex("#FF5252");
+                    verdictCard.BorderBrush = BrushFromHex("#FF5252");
+                    verdictCard.Background = BrushFromHex(config.LightMode ? "#FFEBEE" : "#1F1214");
+                    report.Append($"\nЗапрос прошёл через {resolvedGeminiIp}, но Google отклонил регион этого сервера.");
                     switchNextBtn.Visibility = Visibility.Visible;
                 }
                 else if (isCaptchaDetected)
@@ -506,7 +746,7 @@ namespace DnsSwitcherPro
                     verdictTitle.Foreground = BrushFromHex("#FFAB00");
                     verdictCard.BorderBrush = BrushFromHex("#FFAB00");
                     verdictCard.Background = BrushFromHex("#261A00");
-                    report.Append($"\nВаше местоположение скрыто ({proxyCountry}), но Google временно выдал капчу «Подозрительный трафик» на прокси-IP {ipv4ProxyIp}.\n\nРешение: Нажмите «Сменить DNS-сервер» ниже и очистите кэш Gemini!");
+                    report.Append($"\nВаше местоположение скрыто ({finalVisibleRegion}), но Google временно выдал капчу на прокси-IP {resolvedGeminiIp}.\n\nРешение: Нажмите «Сменить DNS-сервер» ниже и очистите кэш Gemini!");
                     switchNextBtn.Visibility = Visibility.Visible;
                 }
                 else if (browserConflicts.Count > 0)
@@ -515,15 +755,15 @@ namespace DnsSwitcherPro
                     verdictTitle.Foreground = BrushFromHex("#FFAB00");
                     verdictCard.BorderBrush = BrushFromHex("#FFAB00");
                     verdictCard.Background = BrushFromHex("#261A00");
-                    report.Append($"\nСистема направляет Gemini через «{proxyCountry}», но в браузере ({string.Join(", ", browserConflicts.Select(c => c.BrowserName))}) включён сторонний DNS, который выдаёт ваш реальный регион.");
+                    report.Append($"\nСистема направляет Gemini через прокси ({finalVisibleRegion}), но в браузере ({string.Join(", ", browserConflicts.Select(c => c.BrowserName))}) включён сторонний DNS.");
                 }
                 else
                 {
-                    verdictTitle.Text = "✅ Местоположение успешно скрыто!";
+                    verdictTitle.Text = isMatchedCustomVps ? "✅ Ваш личный DNS-прокси активен!" : "✅ Местоположение успешно скрыто!";
                     verdictTitle.Foreground = BrushFromHex(accentColorHex);
                     verdictCard.BorderBrush = BrushFromHex(accentColorHex);
                     verdictCard.Background = BrushFromHex(accentCardBgHex);
-                    report.Append($"\nОтлично! Google Gemini видит ваше подключение из региона «{proxyCountry} ({proxyCountryCode})». Региональных ограничений и капчи не обнаружено.");
+                    report.Append($"\nОтлично! Трафик к Gemini идёт через прокси-узел {resolvedGeminiIp} ({finalVisibleRegion}). Региональных ограничений и капчи не обнаружено.");
                 }
 
                 verdictDetails.Text = report.ToString();
@@ -586,11 +826,14 @@ namespace DnsSwitcherPro
         {
             var excludeDomains = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
+                PriorityGeminiHost,
+                "dnsswitcherpro.com",
                 "gemini.google.com",
                 "www.gemini.google.com",
                 "aistudio.google.com",
                 "makersuite.google.com",
                 "alkalimakersuite-pa.clients6.google.com",
+                "alkalimakersuite-pa.googleapis.com",
                 "generativelanguage.googleapis.com",
                 "proactivebackend-pa.googleapis.com",
                 "notebooklm.google.com",
@@ -1872,10 +2115,10 @@ namespace DnsSwitcherPro
             rbOn.Checked += (s, e) =>
             {
                 if (isUpdatingUi) return;
-                string target = !string.IsNullOrEmpty(config.LastActiveHost)
-                    ? config.LastActiveHost
-                    : (serverList.Count > 0 ? serverList[0].host : "dns.comss.one");
-                ApplyWindowsDnsServer(target);
+                string geminiHost = serverList.FirstOrDefault(x =>
+                    x.host.Equals(PriorityGeminiHost, StringComparison.OrdinalIgnoreCase) ||
+                    x.name.Equals(PriorityGeminiName, StringComparison.OrdinalIgnoreCase))?.host ?? PriorityGeminiHost;
+                ApplyWindowsDnsServer(geminiHost);
             };
 
             Grid.SetColumn(rbOff, 0);
@@ -1898,7 +2141,6 @@ namespace DnsSwitcherPro
             };
             mainLayout.Children.Add(modeCard);
 
-            // Кнопка 1: Проверка защиты и скрытия региона от Google Gemini
             checkGeminiRegionText = new TextBlock
             {
                 Text = "🕵️ Проверить защиту и регион Gemini (Тест IP и капчи)",
@@ -1922,7 +2164,6 @@ namespace DnsSwitcherPro
             checkGeminiRegionBtn.MouseLeftButtonUp += (s, e) => ShowGeminiRegionCheckDialog();
             mainLayout.Children.Add(checkGeminiRegionBtn);
 
-            // Кнопка 2: Очистка кэша и куки Gemini
             var clearGeminiText = new TextBlock
             {
                 Text = "🧹 Очистить кэш и куки Gemini (Сбросить старый регион)",
@@ -1946,7 +2187,6 @@ namespace DnsSwitcherPro
             clearGeminiCacheBtn.MouseLeftButtonUp += (s, e) => ClearGeminiCookiesAndCache();
             mainLayout.Children.Add(clearGeminiCacheBtn);
 
-            // Кнопка 3: Обход DPI (Zapret)
             dpiBypassText = new TextBlock
             {
                 FontSize = 12,
@@ -2150,27 +2390,6 @@ namespace DnsSwitcherPro
                 .FirstOrDefault();
         }
 
-        private void DetectInitialSystemMode()
-        {
-            var nic = GetActiveNetworkInterface();
-            if (nic == null) return;
-
-            var dnsAddresses = nic.GetIPProperties().DnsAddresses
-                .Where(ip => ip.AddressFamily == AddressFamily.InterNetwork)
-                .Select(ip => ip.ToString())
-                .ToList();
-
-            foreach (var kv in knownIps)
-            {
-                if (dnsAddresses.Any(d => kv.Value.Contains(d)))
-                {
-                    config.CurrentMode = "on";
-                    config.LastActiveHost = kv.Key;
-                    return;
-                }
-            }
-        }
-
         private string[] ResolveHostToIpv4(string host)
         {
             try
@@ -2224,19 +2443,21 @@ namespace DnsSwitcherPro
             catch { }
         }
 
-        private void ApplyWindowsDnsServer(string host)
+        private void ApplyWindowsDnsServer(string host, bool silentError = false)
         {
             var nic = GetActiveNetworkInterface();
             if (nic == null)
             {
-                MessageBox.Show("Не найден активный сетевой адаптер!", "Ошибка сети", MessageBoxButton.OK, MessageBoxImage.Warning);
+                if (!silentError)
+                    MessageBox.Show("Не найден активный сетевой адаптер!", "Ошибка сети", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
             var ips = ResolveHostToIpv4(host);
             if (ips.Length == 0)
             {
-                MessageBox.Show($"Не удалось определить IPv4-адрес для {host}. Проверьте подключение к сети.", "Ошибка резолвинга", MessageBoxButton.OK, MessageBoxImage.Warning);
+                if (!silentError)
+                    MessageBox.Show($"Не удалось определить IPv4-адрес для {host}. Проверьте подключение к сети.", "Ошибка резолвинга", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
@@ -2556,7 +2777,7 @@ namespace DnsSwitcherPro
 
             if (config.AutoSortPing)
             {
-                serverList = serverList.OrderBy(s => s.ping > 0 ? s.ping : int.MaxValue).ToList();
+                SortServersWithGeminiPriority();
             }
             SaveConfig();
 
@@ -2567,7 +2788,10 @@ namespace DnsSwitcherPro
 
             if (autoConnectBest)
             {
-                var best = serverList.Where(s => s.ping > 0).OrderBy(s => s.ping).FirstOrDefault();
+                var geminiSrv = serverList.FirstOrDefault(s =>
+                    (s.host.Equals(PriorityGeminiHost, StringComparison.OrdinalIgnoreCase) ||
+                     s.name.Equals(PriorityGeminiName, StringComparison.OrdinalIgnoreCase)) && s.ping > 0);
+                var best = geminiSrv ?? serverList.Where(s => s.ping > 0).OrderBy(s => s.ping).FirstOrDefault();
                 if (best != null) ApplyWindowsDnsServer(best.host);
             }
         }
@@ -2704,7 +2928,7 @@ namespace DnsSwitcherPro
                 ShowEditServerDialog(null, returnToSettings: true);
             }));
 
-            root.Children.Add(CreateMenuCard("📚 Популярные DNS-серверы", "Каталог проверенных серверов", () =>
+            root.Children.Add(CreateMenuCard("📚 Популярные DNS-серверы", "Каталог дополнительных и резервных серверов", () =>
             {
                 dlg.Close();
                 ShowPresetsDialog();
@@ -2789,10 +3013,13 @@ namespace DnsSwitcherPro
                 Content = listBox
             });
 
-            root.Children.Add(CreateDialogButton("⚡ Автовыбор (Подключить лучший #1)", accentColorHex, () =>
+            root.Children.Add(CreateDialogButton("⚡ Автовыбор (Приоритет Gemini / Лучший #1)", accentColorHex, () =>
             {
                 dlg.Close();
-                var best = serverList.Where(s => s.ping > 0).OrderBy(s => s.ping).FirstOrDefault();
+                var geminiSrv = serverList.FirstOrDefault(s =>
+                    (s.host.Equals(PriorityGeminiHost, StringComparison.OrdinalIgnoreCase) ||
+                     s.name.Equals(PriorityGeminiName, StringComparison.OrdinalIgnoreCase)) && s.ping > 0);
+                var best = geminiSrv ?? serverList.Where(s => s.ping > 0).OrderBy(s => s.ping).FirstOrDefault();
                 if (best != null) ApplyWindowsDnsServer(best.host);
                 else CheckNetworkAndTestAll(true);
             }, accentCardBgHex, accentColorHex));
@@ -2892,13 +3119,13 @@ namespace DnsSwitcherPro
             }));
 
             root.Children.Add(CreateMenuCard("🔀 Автосортировка серверов по пингу",
-                config.AutoSortPing ? "Сейчас: Включена (быстрые серверы поднимаются наверх)" : "Сейчас: Отключена", () =>
+                config.AutoSortPing ? "Сейчас: Включена (Gemini всегда #1)" : "Сейчас: Отключена", () =>
             {
                 config.AutoSortPing = !config.AutoSortPing;
                 SaveConfig();
                 if (config.AutoSortPing)
                 {
-                    serverList = serverList.OrderBy(s => s.ping > 0 ? s.ping : int.MaxValue).ToList();
+                    SortServersWithGeminiPriority();
                     RenderServerList();
                 }
                 dlg.Close();
@@ -3208,9 +3435,9 @@ namespace DnsSwitcherPro
                 Margin = new Thickness(0, 0, 0, 14)
             };
 
-            root.Children.Add(new TextBlock { Text = "Название:", Foreground = BrushFromHex(textSubColorHex), Margin = new Thickness(0, 0, 0, 4) });
+            root.Children.Add(new TextBlock { Text = "Название (например, Gemini):", Foreground = BrushFromHex(textSubColorHex), Margin = new Thickness(0, 0, 0, 4) });
             root.Children.Add(nameBox);
-            root.Children.Add(new TextBlock { Text = "Хост (например, dns.comss.one):", Foreground = BrushFromHex(textSubColorHex), Margin = new Thickness(0, 0, 0, 4) });
+            root.Children.Add(new TextBlock { Text = "Хост (например, dns.dnsswitcherpro.com):", Foreground = BrushFromHex(textSubColorHex), Margin = new Thickness(0, 0, 0, 4) });
             root.Children.Add(hostBox);
 
             root.Children.Add(CreateDialogButton("Сохранить", accentColorHex, () =>
@@ -3366,10 +3593,12 @@ namespace DnsSwitcherPro
                 dlg.Close();
             }));
 
-            root.Children.Add(CreateMenuCard("🔄 Сбросить к стандартным 7 серверам", "Восстановить базовый список", () =>
+            root.Children.Add(CreateMenuCard("🔄 Сбросить к стандартным 4 серверам", "Восстановить базовый список (Gemini, Comss, Malw, GeoHide)", () =>
             {
                 serverList = defaultServers.Select(d => new DnsServer { name = d.name, host = d.host }).ToList();
+                config.Migrated4ServersV1 = true;
                 SaveConfig();
+                ConnectPriorityGeminiOnLaunch();
                 dlg.Close();
                 CheckNetworkAndTestAll();
             }));
@@ -3481,9 +3710,19 @@ namespace DnsSwitcherPro
                 catch { }
             }
 
-            if (serverList.Count == 0)
+            if (serverList.Count == 0 || !config.Migrated4ServersV1)
             {
                 serverList = defaultServers.Select(d => new DnsServer { name = d.name, host = d.host }).ToList();
+                config.Migrated4ServersV1 = true;
+                config.CurrentMode = "on";
+                config.LastActiveHost = PriorityGeminiHost;
+                SaveConfig();
+                return;
+            }
+
+            if (!serverList.Any(s => s.host.Equals(PriorityGeminiHost, StringComparison.OrdinalIgnoreCase)))
+            {
+                serverList.Insert(0, new DnsServer { name = PriorityGeminiName, host = PriorityGeminiHost });
                 SaveConfig();
             }
         }
