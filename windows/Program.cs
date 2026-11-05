@@ -12,6 +12,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -63,12 +64,29 @@ namespace DnsSwitcherPro
 
     public class Program
     {
+        private const string SingleInstanceMutexName = @"Local\DnsSwitcherPro_SingleInstance_Mutex";
+        private const string ShowWindowEventName = @"Local\DnsSwitcherPro_ShowWindow_Event";
+
         [STAThread]
         public static void Main(string[] args)
         {
+            using var mutex = new Mutex(true, SingleInstanceMutexName, out bool createdNew);
+            if (!createdNew)
+            {
+                // Если программа уже запущена — разворачиваем существующее окно и закрываем дубликат
+                try
+                {
+                    using var showEvent = EventWaitHandle.OpenExisting(ShowWindowEventName);
+                    showEvent.Set();
+                }
+                catch { }
+                return;
+            }
+
+            using var showWindowEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowWindowEventName);
             bool startMinimized = args.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase));
             var app = new Application();
-            var mainWindow = new MainWindow(startMinimized);
+            var mainWindow = new MainWindow(startMinimized, showWindowEvent);
             app.Run(mainWindow);
         }
     }
@@ -192,7 +210,7 @@ namespace DnsSwitcherPro
             new DnsServer { name = "🌍 GeoHide", host = "geohide.ru" }
         };
 
-        public MainWindow(bool startMinimized)
+        public MainWindow(bool startMinimized, EventWaitHandle showWindowEvent)
         {
             launchMinimized = startMinimized;
             string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
@@ -212,6 +230,17 @@ namespace DnsSwitcherPro
             ApplyCustomWindowAndTrayIcon();
             SetupUI();
             SetupTrayIcon();
+
+            // Слушаем сигнал от повторного запуска ярлыка и выводим уже открытое окно на передний план
+            ThreadPool.RegisterWaitForSingleObject(
+                showWindowEvent,
+                (state, timedOut) =>
+                {
+                    Dispatcher.BeginInvoke(new Action(BringExistingWindowToFront));
+                },
+                null,
+                -1,
+                false);
 
             StateChanged += (s, e) =>
             {
@@ -268,24 +297,29 @@ namespace DnsSwitcherPro
                 if (launchMinimized)
                 {
                     Hide();
-                    trayIcon.ShowBalloonTip(
-                        2000,
-                        "⚡ DNS Switcher Pro активен",
-                        $"Подключен приоритетный сервер {PriorityGeminiName} ({PriorityGeminiHost}).",
-                        Forms.ToolTipIcon.Info);
                 }
             };
 
+            // При закрытии на крестик тихо сворачиваем в трей без каких-либо всплывающих уведомлений
             Closing += (s, e) =>
             {
                 e.Cancel = true;
                 Hide();
-                trayIcon.ShowBalloonTip(
-                    1500,
-                    "DNS Switcher Pro",
-                    "Приложение работает в фоне. Правый клик по иконке — быстрое переключение DNS.",
-                    Forms.ToolTipIcon.Info);
             };
+        }
+
+        private void BringExistingWindowToFront()
+        {
+            Show();
+            if (WindowState == WindowState.Minimized)
+            {
+                WindowState = WindowState.Normal;
+            }
+            RecalculateWindowHeight();
+            Activate();
+            Topmost = true;
+            Topmost = false;
+            Focus();
         }
 
         // Приоритетное подключение к серверу Gemini (dns.dnsswitcherpro.com) при запуске приложения
@@ -369,7 +403,6 @@ namespace DnsSwitcherPro
         {
             string targetSegment = string.IsNullOrWhiteSpace(ip) ? "" : ip.Trim();
 
-            // 1. Основной HTTPS-сервис: ipwho.is
             try
             {
                 string json1 = await http.GetStringAsync($"https://ipwho.is/{targetSegment}?lang=ru");
@@ -392,7 +425,6 @@ namespace DnsSwitcherPro
             }
             catch { }
 
-            // 2. Резервный HTTPS-сервис: get.geojs.io
             try
             {
                 string url2 = string.IsNullOrEmpty(targetSegment)
@@ -415,7 +447,6 @@ namespace DnsSwitcherPro
             }
             catch { }
 
-            // 3. Второй резервный HTTPS-сервис: ipinfo.io
             try
             {
                 string url3 = string.IsNullOrEmpty(targetSegment)
@@ -3630,13 +3661,7 @@ namespace DnsSwitcherPro
                 Text = "DNS Switcher Pro (IPv4 Only)"
             };
 
-            trayIcon.DoubleClick += (s, e) =>
-            {
-                Show();
-                if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
-                RecalculateWindowHeight();
-                Activate();
-            };
+            trayIcon.DoubleClick += (s, e) => BringExistingWindowToFront();
 
             UpdateTrayMenu();
         }
@@ -3644,18 +3669,10 @@ namespace DnsSwitcherPro
         private void UpdateTrayMenu()
         {
             var menu = new Forms.ContextMenuStrip();
-            menu.Items.Add("⚡ Открыть DNS Switcher Pro", null, (s, e) =>
-            {
-                Show();
-                if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
-                RecalculateWindowHeight();
-                Activate();
-            });
+            menu.Items.Add("⚡ Открыть DNS Switcher Pro", null, (s, e) => BringExistingWindowToFront());
             menu.Items.Add("🕵️ Проверить регион Gemini", null, (s, e) =>
             {
-                Show();
-                if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
-                Activate();
+                BringExistingWindowToFront();
                 ShowGeminiRegionCheckDialog();
             });
             menu.Items.Add(new Forms.ToolStripSeparator());
