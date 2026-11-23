@@ -2,8 +2,14 @@ package com.example.dnstoggle
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -92,6 +98,186 @@ object HapticUtil {
     }
 }
 
+// Контроллер постоянного бесшумного значка в строке состояния (статус-баре)
+object DnsStatusNotifier {
+    const val CHANNEL_ID = "dns_active_status_channel"
+    const val NOTIFICATION_ID = 4041
+    const val ACTION_DISABLE_DNS = "com.example.dnstoggle.ACTION_DISABLE_DNS"
+
+    fun hasNotificationPermission(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    fun requestTileUpdate(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                TileService.requestListeningState(
+                    context,
+                    ComponentName(context, DnsTileService::class.java)
+                )
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun sync(context: Context) {
+        try {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val prefs = context.getSharedPreferences("dns_prefs", Context.MODE_PRIVATE)
+            val isEnabledInPrefs = prefs.getBoolean("status_bar_icon_enabled", true)
+
+            val mode = Settings.Global.getString(context.contentResolver, "private_dns_mode") ?: "off"
+            val host = Settings.Global.getString(context.contentResolver, "private_dns_specifier") ?: ""
+
+            if (!isEnabledInPrefs || mode == "off") {
+                nm.cancel(NOTIFICATION_ID)
+                return
+            }
+
+            if (!hasNotificationPermission(context)) {
+                return
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val existing = nm.getNotificationChannel(CHANNEL_ID)
+                if (existing == null) {
+                    val channel = NotificationChannel(
+                        CHANNEL_ID,
+                        "Индикатор Private DNS",
+                        NotificationManager.IMPORTANCE_DEFAULT
+                    ).apply {
+                        description = "Показывает значок в строке состояния, когда включён защищённый DNS"
+                        setSound(null, null)
+                        enableVibration(false)
+                        enableLights(false)
+                        setShowBadge(false)
+                        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                    }
+                    nm.createNotificationChannel(channel)
+                }
+            }
+
+            var matchedName: String? = null
+            val raw = prefs.getString("servers_json", null)
+            if (!raw.isNullOrEmpty() && host.isNotEmpty()) {
+                try {
+                    val arr = JSONArray(raw)
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        if (o.getString("host").equals(host, ignoreCase = true)) {
+                            matchedName = o.getString("name")
+                            break
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+
+            val title: String
+            val subtitle: String
+            when (mode) {
+                "hostname" -> {
+                    title = "DNS активен: ${matchedName ?: "Private DNS"}"
+                    subtitle = if (host.isNotEmpty()) host else "Защищённый DNS включён"
+                }
+                "opportunistic" -> {
+                    title = "DNS активен: Авто"
+                    subtitle = "Системный Private DNS (Автоматический)"
+                }
+                else -> {
+                    nm.cancel(NOTIFICATION_ID)
+                    return
+                }
+            }
+
+            val piFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+
+            val openIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val openPi = PendingIntent.getActivity(context, 1, openIntent, piFlags)
+
+            val disableIntent = Intent(context, DnsStatusReceiver::class.java).apply {
+                action = ACTION_DISABLE_DNS
+            }
+            val disablePi = PendingIntent.getBroadcast(context, 2, disableIntent, piFlags)
+
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Notification.Builder(context, CHANNEL_ID)
+            } else {
+                @Suppress("DEPRECATION")
+                Notification.Builder(context)
+            }
+
+            builder
+                .setSmallIcon(R.drawable.ic_dns_tile)
+                .setContentTitle(title)
+                .setContentText(subtitle)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setShowWhen(false)
+                .setContentIntent(openPi)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val disableAction = Notification.Action.Builder(null, "Выключить", disablePi).build()
+                builder.addAction(disableAction)
+            } else {
+                @Suppress("DEPRECATION")
+                builder.addAction(0, "Выключить", disablePi)
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
+            }
+
+            nm.notify(NOTIFICATION_ID, builder.build())
+        } catch (_: Exception) {}
+    }
+}
+
+// Обработчик кнопки «Выключить» прямо из шторки уведомлений
+class DnsStatusReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent?) {
+        if (intent?.action != DnsStatusNotifier.ACTION_DISABLE_DNS) return
+
+        if (context.checkSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS) != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(context, "Нет разрешения WRITE_SECURE_SETTINGS", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        try {
+            val prefs = context.getSharedPreferences("dns_prefs", Context.MODE_PRIVATE)
+            val currentMode = Settings.Global.getString(context.contentResolver, "private_dns_mode") ?: "off"
+            val currentHost = Settings.Global.getString(context.contentResolver, "private_dns_specifier") ?: ""
+            if (currentMode == "hostname" && currentHost.isNotEmpty()) {
+                prefs.edit().putString("last_active_host", currentHost).apply()
+            }
+
+            Settings.Global.putString(context.contentResolver, "private_dns_mode", "off")
+            HapticUtil.vibrate(context, true)
+            DnsStatusNotifier.sync(context)
+            DnsStatusNotifier.requestTileUpdate(context)
+        } catch (_: Exception) {}
+    }
+}
+
+// Восстановление значка в строке состояния после перезагрузки устройства
+class DnsBootReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent?) {
+        val action = intent?.action ?: return
+        if (action == Intent.ACTION_BOOT_COMPLETED || action == Intent.ACTION_MY_PACKAGE_REPLACED) {
+            DnsStatusNotifier.sync(context)
+            DnsStatusNotifier.requestTileUpdate(context)
+        }
+    }
+}
+
 class ShieldDrawable(private var shieldColor: Int, private var isFilled: Boolean) : Drawable() {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = if (isFilled) Paint.Style.FILL else Paint.Style.STROKE
@@ -175,6 +361,7 @@ class MainActivity : Activity() {
         private const val REQ_EXPORT_FILE = 1001
         private const val REQ_IMPORT_FILE = 1002
         private const val REQ_SHIZUKU_PERMISSION = 1003
+        private const val REQ_POST_NOTIFICATIONS = 1004
         const val PRIORITY_GEMINI_HOST = "dns.dnsswitcherpro.com"
         const val PRIORITY_GEMINI_NAME = "Gemini"
     }
@@ -229,7 +416,34 @@ class MainActivity : Activity() {
         loadServers()
         setupUI()
         connectPriorityGeminiOnLaunch()
+        requestNotificationPermissionIfNeeded(force = false)
         registerSystemBackVibrate()
+    }
+
+    private fun requestNotificationPermissionIfNeeded(force: Boolean) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val iconEnabled = prefs.getBoolean("status_bar_icon_enabled", true)
+            if (!iconEnabled && !force) return
+            if (!DnsStatusNotifier.hasNotificationPermission(this)) {
+                val alreadyAsked = prefs.getBoolean("notif_perm_asked", false)
+                if (force || !alreadyAsked) {
+                    prefs.edit().putBoolean("notif_perm_asked", true).apply()
+                    requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQ_POST_NOTIFICATIONS)
+                }
+            }
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_POST_NOTIFICATIONS) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                DnsStatusNotifier.sync(this)
+                Toast.makeText(this, "🔔 Значок статуса DNS активирован", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Для показа значка вверху экрана нужно разрешение на уведомления", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     // Приоритетное подключение к серверу Gemini (dns.dnsswitcherpro.com) при запуске приложения
@@ -248,6 +462,8 @@ class MainActivity : Activity() {
             try {
                 Settings.Global.putString(contentResolver, "private_dns_mode", "hostname")
                 Settings.Global.putString(contentResolver, "private_dns_specifier", priorityServer.host)
+                DnsStatusNotifier.sync(this)
+                DnsStatusNotifier.requestTileUpdate(this)
             } catch (_: Exception) {}
         }
     }
@@ -1681,7 +1897,7 @@ class MainActivity : Activity() {
             Pair("🕵️ Проверить защиту и регион Gemini", "Тест скрытия местоположения, IPv6 и капчи"),
             Pair("🧹 Очистить кэш Gemini и браузеров", "Сброс сессии, куки и региональной метки"),
             Pair("💾 Бэкап и сброс настроек", "Экспорт/импорт JSON, сброс списка"),
-            Pair("✨ Кастомизация", "Тема, светлый/темный режим и стиль")
+            Pair("✨ Кастомизация", "Значок в строке состояния, тема и стиль")
         )
 
         for ((index, item) in options.withIndex()) {
@@ -1768,6 +1984,11 @@ class MainActivity : Activity() {
 
         rootLayout.addView(createDialogHeaderTitle("✨ Кастомизация"))
 
+        val scrollView = ScrollView(this).apply {
+            val maxHeight = (resources.displayMetrics.heightPixels * 0.58).toInt()
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxHeight)
+        }
+
         val optionsContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
@@ -1777,8 +1998,17 @@ class MainActivity : Activity() {
             val isHapticOn = prefs.getBoolean("haptic_enabled", true)
             val isSimpleToggle = prefs.getBoolean("tile_simple_toggle", true)
             val isAutoSortOn = prefs.getBoolean("auto_sort_ping", true)
+            val isStatusIconOn = prefs.getBoolean("status_bar_icon_enabled", true)
+            val hasNotifPerm = DnsStatusNotifier.hasNotificationPermission(this@MainActivity)
+
+            val statusIconSub = when {
+                !isStatusIconOn -> "Сейчас: Отключен"
+                !hasNotifPerm -> "Включен, но нет разрешения на уведомления (нажмите)"
+                else -> "Сейчас: Включен (значок виден вверху при активном DNS)"
+            }
 
             val customOptions = listOf(
+                Pair("🔔 Значок в строке состояния", statusIconSub),
                 Pair("🎨 Выбор темы и акцента", "Цветовая палитра и янтарный стиль"),
                 Pair("☀️ Режим интерфейса", if (isLightMode) "Сейчас: Светлая тема" else "Сейчас: Темная тема"),
                 Pair("🔀 Автосортировка по пингу", if (isAutoSortOn) "Сейчас: Включена (Gemini всегда #1)" else "Сейчас: Отключена (фиксированный порядок)"),
@@ -1800,16 +2030,32 @@ class MainActivity : Activity() {
                         vibrateClick()
                         when (index) {
                             0 -> {
+                                if (isStatusIconOn && !hasNotifPerm) {
+                                    requestNotificationPermissionIfNeeded(force = true)
+                                } else {
+                                    val newStatusIcon = !isStatusIconOn
+                                    prefs.edit().putBoolean("status_bar_icon_enabled", newStatusIcon).apply()
+                                    if (newStatusIcon && !DnsStatusNotifier.hasNotificationPermission(this@MainActivity)) {
+                                        requestNotificationPermissionIfNeeded(force = true)
+                                    } else {
+                                        DnsStatusNotifier.sync(this@MainActivity)
+                                    }
+                                    renderCustomizationOptions()
+                                    val msg = if (newStatusIcon) "Значок в строке состояния включён" else "Значок в строке состояния отключён"
+                                    Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                            1 -> {
                                 customDialog?.dismiss()
                                 showThemeChooserDialog()
                             }
-                            1 -> {
+                            2 -> {
                                 val newLightMode = !isLightMode
                                 saveAndApplyTheme(currentThemeKey, newLightMode)
                                 customDialog?.dismiss()
                                 showCustomizationDialog()
                             }
-                            2 -> {
+                            3 -> {
                                 val newSort = !isAutoSortOn
                                 prefs.edit().putBoolean("auto_sort_ping", newSort).apply()
                                 if (newSort) {
@@ -1821,12 +2067,12 @@ class MainActivity : Activity() {
                                 val msg = if (newSort) "Автосортировка включена (Gemini #1)" else "Порядок серверов зафиксирован"
                                 Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
                             }
-                            3 -> {
+                            4 -> {
                                 prefs.edit().putBoolean("tile_simple_toggle", !isSimpleToggle).apply()
                                 renderCustomizationOptions()
                                 Toast.makeText(this@MainActivity, "Режим шторки изменен", Toast.LENGTH_SHORT).show()
                             }
-                            4 -> {
+                            5 -> {
                                 val newState = !isHapticOn
                                 prefs.edit().putBoolean("haptic_enabled", newState).apply()
                                 if (newState) HapticUtil.vibrate(this@MainActivity, true)
@@ -1859,7 +2105,8 @@ class MainActivity : Activity() {
         }
 
         renderCustomizationOptions()
-        rootLayout.addView(optionsContainer)
+        scrollView.addView(optionsContainer)
+        rootLayout.addView(scrollView)
 
         val backBtn = TextView(this).apply {
             text = "Назад к настройкам"
@@ -2248,6 +2495,7 @@ class MainActivity : Activity() {
                 prefs.edit().putString("last_active_host", host).apply()
             }
             refreshSystemState()
+            DnsStatusNotifier.requestTileUpdate(this)
         } catch (e: Exception) {
             Toast.makeText(this, "Ошибка: ${e.message}", Toast.LENGTH_LONG).show()
         }
@@ -2324,6 +2572,7 @@ class MainActivity : Activity() {
         }
 
         isUpdatingUi = false
+        DnsStatusNotifier.sync(this)
         renderServerList()
     }
 
@@ -2601,6 +2850,7 @@ class MainActivity : Activity() {
                     serverList.add(DnsServer(cleanName, cleanHost))
                 }
                 saveServers()
+                DnsStatusNotifier.sync(this@MainActivity)
                 editDialog?.dismiss()
                 checkNetworkAndTestAll()
             }
@@ -3405,5 +3655,6 @@ class DnsTileService : TileService() {
             }
         }
         tile.updateTile()
+        DnsStatusNotifier.sync(this)
     }
 }
